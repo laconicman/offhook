@@ -1,0 +1,62 @@
+# XcodeGen manifest for Offhook — the swift-pjsua bring-up / debug softphone.
+#
+#   brew install xcodegen      # if needed
+#   cd offhook && xcodegen generate && open Offhook.xcodeproj
+#
+# The .xcodeproj is generated (git-ignored); this file is the source of truth.
+name: Offhook
+options:
+  bundleIdPrefix: com.laconicman
+  deploymentTarget:
+    iOS: "17.0"          # swift-pjsua floor (SE-0392 custom executors)
+  createIntermediateGroups: true
+
+# Local packages. Declaring swift-pjsip here pins swift-pjsua's transitive dependency to the
+# local checkout (same package identity overrides the GitHub branch:main edge — closes TD-1
+# for local builds) and avoids a network fetch.
+packages:
+  swift-pjsua:
+    path: ../swift-pjsua
+  swift-pjsip:
+    path: ../swift-pjsip
+
+targets:
+  Offhook:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    dependencies:
+      # CallKit milestone: the Kit (CXProvider + CallSessionRouter) is the sole engine.events
+      # consumer; the app talks CallKit (CXCallController/CXCallObserver), not engine events.
+      - package: swift-pjsua
+        product: SwiftPJSUA
+      - package: swift-pjsua
+        product: SwiftPJSUAKit
+    scheme:
+      testTargets:
+        - OffhookTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.laconicman.offhook
+        INFOPLIST_FILE: Sources/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.9"
+        CODE_SIGN_STYLE: Automatic
+
+  # Live-infrastructure integration tests (standalone runner — no app host). Credentials come
+  # from OFFHOOK_TEST_ACC<n>_* env vars first, then ../secrets/test-accounts.env (outside the
+  # repo); see Tests/TestAccounts.swift. Run: xcodebuild test -scheme Offhook -destination …
+  OffhookTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - package: swift-pjsua
+        product: SwiftPJSUA
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.laconicman.offhook.tests
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: YES
