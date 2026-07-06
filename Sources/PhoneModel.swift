@@ -109,12 +109,11 @@ final class PhoneModel: NSObject {
         do {
             try await engine.start()
             // Registration relay: the router owns the event stream; the app observes through it.
+            // The observer is @MainActor, so this closure runs on the main actor — update directly.
             await callKit.router.setRegistrationObserver { [weak self] _, active, code, expiration in
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    registration = active ? "registered (\(code))" : "not registered (\(code))"
-                    note("reg: active=\(active) code=\(code) expires=\(expiration)s")
-                }
+                guard let self else { return }
+                registration = active ? "registered (\(code))" : "not registered (\(code))"
+                note("reg: active=\(active) code=\(code) expires=\(expiration)s")
             }
             engineState = .running
             note("engine started — CallKit routing active")
