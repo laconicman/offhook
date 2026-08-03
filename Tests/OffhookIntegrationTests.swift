@@ -49,11 +49,12 @@ final class OffhookIntegrationTests: XCTestCase {
             throw XCTSkip("needs an account slot ≥ 3 — won't risk rate-limiting the loopback pair")
         }
         let probeUser = "offhook-bogus-probe"
-        let bad = try await harness.engine.addAccount(id: "sip:\(probeUser)@\(account.domain)",
-                                                      registrar: account.registrar,
-                                                      username: probeUser,
-                                                      password: "wrong-\(UUID().uuidString.prefix(8))",
-                                                      makeDefault: false)
+        let bad = try await harness.engine.addAccount(
+            AccountConfiguration(id: "sip:\(probeUser)@\(account.domain)",
+                                 registrar: account.registrar,
+                                 username: probeUser,
+                                 isDefault: false),
+            credentials: InlineCredentialStore(password: "wrong-\(UUID().uuidString.prefix(8))"))
         let reg: EngineHarness.Registration
         do {
             reg = try await harness.waitForRegistrationResult(bad)
@@ -88,11 +89,12 @@ final class OffhookIntegrationTests: XCTestCase {
     func test03_allConfiguredAccountsRegister() async throws {
         try XCTSkipIf(TestAccounts.all.isEmpty, "no test accounts configured")
         for (slot, account) in TestAccounts.all.sorted(by: { $0.key < $1.key }) {
-            let id = try await harness.engine.addAccount(id: account.aor,
-                                                         registrar: account.registrar,
-                                                         username: account.username,
-                                                         password: account.password,
-                                                         makeDefault: slot == 1)
+            let id = try await harness.engine.addAccount(
+                AccountConfiguration(id: account.aor,
+                                     registrar: account.registrar,
+                                     username: account.username,
+                                     isDefault: slot == 1),
+                credentials: InlineCredentialStore(password: account.password))
             let reg: EngineHarness.Registration
             do {
                 reg = try await harness.waitForRegistrationResult(id)

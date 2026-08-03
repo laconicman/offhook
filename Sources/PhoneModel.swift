@@ -127,11 +127,16 @@ final class PhoneModel: NSObject {
         guard engineState == .running else { note("start the engine first"); return }
         let id = "sip:\(username)@\(registrar.split(separator: ";").first.map(String.init) ?? registrar)"
         do {
+            // The secret's provenance is explicit at the call site: this bring-up UI holds a
+            // typed-in password, so it wraps it. A production app would pass a Keychain-backed
+            // CredentialStore here instead — the engine never sees where it came from.
             let added = try await engine.addAccount(
-                id: id,
-                registrar: "sip:\(registrar)",
-                username: username,
-                password: password
+                AccountConfiguration(
+                    id: id,
+                    registrar: "sip:\(registrar)",
+                    username: username
+                ),
+                credentials: InlineCredentialStore(password: password)
             )
             account = added
             await callKit.router.setOutgoingAccount(added)
