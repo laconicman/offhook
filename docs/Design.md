@@ -19,7 +19,7 @@ main actor never blocks on `pjsua_*`.
 
 **Rejected.** Views calling the engine directly, or scattering engine access across types — that
 re-introduces the re-entrancy and threading hazards the engine's one-thread model exists to
-prevent (see `../swift-pjsua/docs/Production-Roadmap.md`).
+prevent (see `../../swift-pjsua/docs/Production-Roadmap.md`).
 
 ## Engine events: one long-lived `Task`, mutate on the main actor
 
@@ -72,12 +72,30 @@ transitive dependency drift back to the remote.
 
 - **iOS 17+.** Floor set by `swift-pjsua` (SE-0392 custom executors).
 - **G.711 only** (PCMU/PCMA; also G.722/iLBC/G.729). Opus is absent from the current
-  `swift-pjsip` binary — see `../swift-pjsip/docs/Codec-Coverage.md`. Fine for all echo endpoints
+  `swift-pjsip` binary — see `../../swift-pjsip/docs/Codec-Coverage.md`. Fine for all echo endpoints
   in [SIP-Test-Infrastructure](./SIP-Test-Infrastructure.md).
+- **Microphone mode (Voice Isolation / Wide Spectrum) is user-owned, not app-controlled.** There
+  is no API to select or read it on either platform. The only lever an app has is
+  `NSAlwaysAllowMicrophoneModeControl` in `Info.plist`, which lets the system offer the Mic Mode
+  picker outside an active capture session; the choice stays the user's, made in Control Center.
+  Any "enable noise suppression" affordance we ship is therefore an *explanation plus a deep link*,
+  never a toggle that claims to control it. What we **can** control is the VoiceProcessingIO unit's
+  ducking of other audio — a build-time setting since
+  [pjproject#5178](https://github.com/pjsip/pjproject/pull/5178), configured in `swift-pjsip`'s
+  `scripts/config_site.h`, not an app-level toggle either. See [Roadmap](./Roadmap.md).
+  *Source: [Prior-Art](./Prior-Art.md) §1.3.*
+- **On macOS, echo cancellation and a device picker are mutually exclusive.** pjmedia sets
+  `kAudioOutputUnitProperty_CurrentDevice` only when EC is *off*, because setting it under VPIO
+  breaks the later buffer-size query. So a Mac build either cancels echo or lets the user choose a
+  mic — never both — and the warning pjsip logs about it fires only when input *and* output are
+  both explicitly set, so a single-device choice is dropped silently. This is a product decision
+  waiting to be made, not a bug to engineer around; Mac users expect a device picker.
+  *Details: `../../swift-pjsua/docs/Tech-Debt.md` TD-8.*
 
 ## See Also
 
 - [Roadmap](./Roadmap.md)
 - [Tech-Debt](./Tech-Debt.md)
+- [Prior-Art](./Prior-Art.md)
 - [SIP-Test-Infrastructure](./SIP-Test-Infrastructure.md)
-- `../swift-pjsua/docs/Production-Roadmap.md`, `../swift-pjsua/docs/SwiftPJSUAKit-Design.md`
+- `../../swift-pjsua/docs/Production-Roadmap.md`, `../../swift-pjsua/docs/SwiftPJSUAKit-Design.md`

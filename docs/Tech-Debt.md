@@ -47,7 +47,7 @@ No STUN/ICE surface in the UI; blocked on `swift-pjsua` TD-14 exposing the engin
 `username`/`password` live in `PhoneModel` `@State`, unpersisted and unprotected.
 
 - **Cost.** Re-typed every launch; not secure for a real account.
-- **Discharge.** Keychain-backed account store (`../Phone` has a reference implementation).
+- **Discharge.** Keychain-backed account store (`../../Phone` has a reference implementation).
 
 ### OH-7 — Integration suite is XCTest, not Swift Testing · *deferred (works; don't churn)*
 
@@ -75,7 +75,25 @@ independent engine instances.
   tap dial/answer) drives A→B and asserts via the app's on-screen state/log. Prereq for the CallKit
   milestone's regression net. (Roadmap: Later)
 
+### OH-9 — "connected but no audio" is diagnosable only by ear · *open*
+
+Phase 0's success criterion is *hear audio*, and today nothing measures whether we did. When media
+never flows, the app reports a connected call and the only instrument is a human listening. There
+is no record of how long setup took, whether the sound device was open when media started, or
+whether the microphone ever produced a sample.
+
+- **Cost.** Every audio bring-up failure — the most common class in this stack — is bisected by
+  hand. It also leaves a flaky provider ([SIP-Test-Infrastructure](./SIP-Test-Infrastructure.md))
+  indistinguishable from one of our own regressions.
+- **Discharge.** Two halves. *Engine:* per-call timings (created→confirmed, confirmed→media,
+  created→media, media→first captured mic sample) plus sound-device-active state around media
+  start, emitted once per call — `../../TASK-code-swift-pjsua-audio-and-diagnostics.md` §3. *App:*
+  surface the timeline in the debug/SIP tooling UI ([Roadmap](./Roadmap.md), Later). The app half
+  is deferred until the engine half lands; the engine half is worth having on its own, since the
+  integration suite can assert on it.
+- *Source: [Prior-Art](./Prior-Art.md) §1.3 — SashaSIP instruments exactly these four intervals.*
+
 ## See Also
 
-- [Design](./Design.md) · [Roadmap](./Roadmap.md)
-- `../swift-pjsua/docs/Tech-Debt.md` (TD-1, TD-14 referenced above)
+- [Design](./Design.md) · [Roadmap](./Roadmap.md) · [Prior-Art](./Prior-Art.md)
+- `../../swift-pjsua/docs/Tech-Debt.md` (TD-1, TD-14 referenced above)

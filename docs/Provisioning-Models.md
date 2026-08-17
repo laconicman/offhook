@@ -5,7 +5,7 @@ the implementation level** and we will have to branch. Current target is **Model
 on the roadmap and may warrant a separate app rather than a dual-nature one.
 
 Companion docs: `Credentials.md` (Keychain, D-CRED-1..5),
-`swift-pjsua/docs/Configuration-Design.md` (the `CredentialStore` seam that makes both models
+`../../swift-pjsua/docs/Configuration-Design.md` (the `CredentialStore` seam that makes both models
 pluggable without engine changes).
 
 ---
@@ -50,11 +50,11 @@ Design consequences that do not exist in Model A:
 - **Config, not just secrets, becomes remote** — registrar/port/STUN. `AccountConfiguration` being
   `Codable` was chosen partly for this: a middleware payload can decode straight into it.
 
-### B.1 The unresolved race — needs its own research
+### B.1 The push-vs-active-socket race — **researched, see the decision record**
 
 **A VoIP push plus a re-REGISTER-with-new-config can arrive while an active PJSIP socket
 connection already exists.** The pushed/reconfigured settings should take over — but *how*,
-without dropping the call the push is announcing, is not designed:
+without dropping the call the push is announcing, was not designed:
 
 - Does the new config apply before or after the in-flight INVITE is answered?
 - `pjsua_acc_modify` + `set_registration(renew)` unregisters and re-registers when credentials
@@ -63,8 +63,16 @@ without dropping the call the push is announcing, is not designed:
 - Our engine serialises everything on one executor thread, which prevents interleaving but does
   **not** decide precedence.
 
-> **Open topic — deserves a Cowork research pass and a roadmap entry of its own.** Do not
-> improvise this when Model B work starts.
+> **Answered by [`Push-vs-Active-Socket.md`](./Push-vs-Active-Socket.md)** (2026-08-04). The short
+> version: **check for config equality first, then defer.** A config change that arrives while a
+> call is live is queued and applied when the *last* call ends; the only changes safe to apply
+> mid-call are those pjsua emits no signalling for, and those are exactly the ones that do not help
+> you answer. Credentials and push parameters both force an unregister-then-re-REGISTER, and that
+> unregister genuinely removes the binding.
+>
+> That record also carries the `pjsua_acc_modify` field-by-field classification, the per-transport
+> cost of holding vs. not holding a socket, the RFC 8599 `pn-purr` / `sip.pnsreg` recommendations,
+> and the list of what remains unverified. Do not improvise this when Model B work starts.
 
 ---
 
@@ -115,6 +123,30 @@ against a binding established by an *earlier* REGISTER. So after a reboot with n
 
 So the real failure mode is *"VoIP survives until the registration expires, then stops until the
 phone is unlocked"* — not *"VoIP is dead after reboot"*.
+
+**Correction to an earlier claim in this doc's discussion (2026-08-04).** It was said that RFC 8599
+solves binding expiry because "the proxy owns waking you when a refresh is due". **On iOS that
+mechanism has no reliable transport, so the claim was wrong:**
+
+- A **PushKit VoIP push must result in a CallKit call** — since iOS 13 the app is terminated (and
+  repeat offenders lose the VoIP-push entitlement) if it does not report one. So a VoIP push cannot
+  be used to silently wake the app for a re-REGISTER; it would have to ring the user.
+- A **silent push** (`content-available`, background priority) *can* wake without UI but is
+  explicitly best-effort — throttled, coalescible, droppable, and dead if the user force-quit the
+  app. Not a foundation for keeping a binding alive.
+- **Background App Refresh** is opportunistic, arbitrarily late, and user-disableable.
+
+RFC 8599 §4.1.4 even says that *absent* the `sip.pnsreg` indicator a UA "SHOULD only send a
+binding-refresh REGISTER request when it receives a push notification" — i.e. the RFC assumes a
+push service that can silently wake a UA on demand. **APNs is not that service for this purpose.**
+
+The practical consequence, and it matches the original instinct that mobile registrations should not
+expire: on iOS the durable reachability is the **push-token binding held server-side**, not a live
+SIP registration. Infrastructure that grants long expiry (or treats the push token as the binding)
+works; infrastructure that demands a short refresh is structurally hostile to iOS clients, because
+the client cannot be woken to comply without ringing the user. Related engine hazard: **TD-24** —
+after suspension pjsip does not notice the OS killed its socket until a send fails or a 90 s
+keep-alive timer fires, so "we are registered" can be false on resume.
 
 **Mitigations available today:** negotiate the longest registration expiry the provider allows;
 re-register immediately on first unlock; treat "credential unavailable" as an expected,

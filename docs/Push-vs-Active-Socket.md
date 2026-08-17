@@ -52,7 +52,7 @@ All line numbers are `pjsip/src/pjsua-lib/pjsua_acc.c` on `4896a5e6a`.
 | `auth_pref.algorithm` | `unreg_first` | 1692–1696 |
 | `reg_uri` | `unreg_first` | 1759–1763 |
 | `use_rfc5626` / `rfc5626_instance_id` / `rfc5626_reg_id` | `unreg_first` | 1767–1786 |
-| `publish_enabled` | re-REGISTER only (`update_reg`) | 1491–1494 |
+| `publish_enabled` (enabling it) | re-REGISTER only (`update_reg`) | 1489–1494 |
 | `ka_interval` (keep-alive not running) | re-REGISTER only | 1598–1601 |
 | `reg_timeout` | re-REGISTER only; also `pjsip_regc_update_expires` in place | 1706–1709 |
 | `sip_stun_use` | re-REGISTER only | 1832–1834 |
@@ -81,9 +81,11 @@ if (update_reg && !cfg->disable_reg_on_modify) { pjsua_acc_set_registration(inde
 Three things follow, all verified:
 
 1. **The un-REGISTER really reaches the registrar.** `destroy_regc` → `pjsip_regc_destroy2(force)`
-   sets `_delete_flag` and NULLs `regc->cb` when a transaction is in flight
-   (`pjsip/src/pjsip-ua/sip_reg.c:198-215`); `tsx_callback` then *skips the application callback*
-   but the transaction itself completes normally (`sip_reg.c:1380-1386`). So the binding is
+   takes its *transaction-in-flight* branch: it sets `_delete_flag`, NULLs `regc->cb` and returns
+   **without freeing anything** (`pjsip/src/pjsip-ua/sip_reg.c:203-207`). `tsx_callback` then
+   *skips the application callback* but the transaction itself completes normally
+   (`sip_reg.c:1380-1386`), and the real teardown happens later via
+   `pjsip_regc_dec_ref` → `pjsip_regc_destroy` (`sip_reg.c:441-449`). So the binding is
    genuinely **removed server-side** — it is not left to expire, and our app never hears about it.
    Between that point and the 2xx of the new REGISTER the account is **unreachable for inbound
    calls**, and the push server has nothing to push against.
@@ -92,13 +94,42 @@ Three things follow, all verified:
    (`pjsua_acc.c:288-314`).
 3. **`disable_reg_on_modify` does not do what its name suggests.** It suppresses the un-REGISTER
    and the re-REGISTER, but `destroy_regc()` still runs. The account therefore keeps a live binding
-   on the server that it will *never refresh* — the refresh timer lived inside the destroyed regc
-   (`sip_reg.c:207-210` cancels it) — until something calls `pjsua_acc_set_registration()` again.
+   on the server that it will *never refresh* — the refresh timer lives inside the regc and is
+   cancelled by `pjsip_regc_destroy2`'s no-transaction-in-flight branch (`sip_reg.c:212-216`),
+   which is exactly the branch taken here because suppressing the un-REGISTER means there is no
+   transaction — until something calls `pjsua_acc_set_registration()` again.
    The documented purpose ("disable when immediate registration is not desirable, such as during IP
    address change", `pjsua.h:5055-5065`) is safe only because pjsua's own IP-change path always
    re-registers afterwards. **Used as "apply config without REGISTER traffic", it silently expires
-   your registration.** → upstream note
-   [`acc-modify-disable-reg-still-destroys-regc`](../../swift-pjsua/Upstream/acc-modify-disable-reg-still-destroys-regc.md).
+   your registration.**
+
+   > **Established 2026-08-17: this is deliberate, and only the docs are wrong.**
+   > [#3910](https://github.com/pjsip/pjproject/pull/3910) guarded the whole block;
+   > [#4509](https://github.com/pjsip/pjproject/pull/4509) (`ce81bb698`, labelled `type: bug`)
+   > moved the guard inward on purpose — *"destroying old regc may still be needed so we can use
+   > the updated registration related settings"*. The doc comment has not changed since #3910, in
+   > either `pjsua.h` or `pjsua2/account.hpp`. **Encouragingly, #4509's rationale is our design:**
+   > apply the settings, let the *next* registration carry them — precisely the pending-config slot
+   > drained on last-call-end in §2. We just have to own the re-registration.
+   > → upstream note [`draft-acc-modify-disable-reg-still-destroys-regc`](../../swift-pjsua/Upstream/draft-acc-modify-disable-reg-still-destroys-regc.md),
+   > handoff `TASK-code-pjsip-disable-reg-on-modify.md`.
+
+### 1.2a How much of the teardown is actually necessary *(added 2026-08-17)*
+
+The `unreg_first` cost above is a **pjsua policy, not a SIP or `pjsip_regc` necessity.** Only five
+pieces of regc state have no public setter and genuinely force a rebuild — **registrar/target URI,
+From, To, Call-ID, CSeq** — plus header *removal*, because `pjsip_regc_add_headers()` is
+additive-only (the `pj_list_init` reset is commented out, `sip_reg.c:544-545`). Everything else has
+one: `pjsip_regc_update_contact`, `_update_expires`, `_set_route_set`, `_set_credentials`,
+`_set_auth_sess`, `_set_prefs`, `_set_transport` (which does **not** update the Contact — pair it),
+`_set_via_sent_by`.
+
+Mapping that onto §1.1: the teardown is genuinely required only for **`id`**, **`reg_uri`**, and
+**`reg_hdr_list`** when a header is removed. Credentials and all four contact-param fields — *our
+two most likely Model-B updates* — map onto state that has a setter. This does not change any
+decision in §2 (we go through pjsua-lib, so we pay pjsua's policy), but it does mean the cost is
+contingent rather than fundamental, and it is the basis for the optional upstream enhancement in
+`TASK-code-pjsip-disable-reg-on-modify.md` (Deliverable B). Tracked as `swift-pjsua` TD-25.
 
 ### 1.3 Established calls are *not* torn down by `acc_modify` — but new dialogs get a different Contact
 
@@ -131,9 +162,11 @@ in flight, and equally happily hand the UAS dialog a synthesised Contact.
 
 - **`pjsua_acc_set_registration()` right after `pjsua_acc_modify()` returns `PJSIP_EBUSY`.**
   `pjsip_regc_send` refuses while `has_tsx` is set (`sip_reg.c:1565-1573`). `swift-pjsua`'s
-  `reRegister` does exactly this (`PJJSUA+Accounts.swift`, the `pjsua_acc_modify` →
-  `pjsua_acc_set_registration(true)` tail) and `.throwIfFailed()`s the result — so a **successful**
-  credential rotation surfaces as a thrown error. Local bug; see §8.
+  `reRegister` does exactly this (`Sources/SwiftPJSUA/PJSUA+Accounts.swift`, the `pjsua_acc_modify`
+  → `pjsua_acc_set_registration(true)` tail) and `.throwIfFailed()`s the result — so a
+  **successful** credential rotation would surface as a thrown error. Local bug; see §8 and TD-23.
+  *(Static reading — whether `has_tsx` is still set by the time we call depends on transport speed,
+  so this wants a runtime test.)*
 - **`use_rfc5626` defaults to `PJ_TRUE`** (`pjsua.h:4630-4648`) and is *silently ignored on UDP*
   (`need_outbound` requires `;transport=tcp` or `;transport=tls` in the Contact,
   `pjsua_acc.c:2105-2122`). So on TCP/TLS we are already an RFC 5626 client whether we decided to
@@ -275,7 +308,7 @@ So H2's real question is **what we must do on wake**:
 | **Unregister-then-register races an inbound INVITE** | Binding is genuinely gone for the gap (§1.2.1); if the INVITE lands in the gap it is still answerable, but with a synthesised Contact (§1.3). | Row 6 makes the gap impossible while a call is up. For the no-call case, accept the gap but keep it short — do not interleave other work. |
 | **Re-registration fails after a config change** | The account is left unregistered **and the config is not rolled back** (already documented at `Configuration-Design.md` D-CONFIG-4). Auto-retry only fires for 408/480/500/502/503/504/6xx (`pjsua_acc.c:3137-3148`). | Keep the previous known-good `AccountConfiguration` and re-apply it on a non-retryable failure. This is app-side; pjsua will not do it. |
 | **`disable_reg_on_modify` used to "apply quietly"** | Silently expires the registration (§1.2.3). | Do not use it for this. If we ever need a truly signalling-free apply, the only safe fields are §1.1's silent column. |
-| **439 (First Hop Lacks Outbound Support)** | Defined (`sip_msg.h:506`) but never acted on: not in the auto-retry set, no outbound fallback. With `use_rfc5626` defaulting on, a TCP/TLS registration through a non-outbound-capable first hop leaves the account **permanently unregistered**. RFC 5626 §4.2.1 says the UA MAY re-attempt without outbound. | App-side: on 439, set `use_rfc5626 = false` and re-register. → upstream note [`439-not-handled`](../../swift-pjsua/Upstream/439-first-hop-lacks-outbound-not-handled.md). |
+| **439 (First Hop Lacks Outbound Support)** | ~~Defined (`sip_msg.h:506`) but never acted on~~ — **fixed upstream 2026-08 by our own PRs [#5154](https://github.com/pjsip/pjproject/pull/5154) (`77ad3feec`) and [#5168](https://github.com/pjsip/pjproject/pull/5168) (`716ef557d`)**: pjsua now retries registration without SIP outbound on 439, and a first-hop change clears the sticky rejection (`first_hop_changed` → `reset_outbound_rejection()` in `pjsua_acc_modify()`). | **Do not build the app-side mitigation this row used to prescribe.** Still latent until `swift-pjsip` ships a binary carrying both commits — `swift-pjsua` TD-22. Note: [`pjproject-5154`](../../swift-pjsua/Upstream/pjproject-5154-439-first-hop-lacks-outbound.md). |
 | **Proxy demands more refresh lead time than our margin** | `sip.pnsreg` indicator is never parsed (TD-20); pjsua schedules purely from `Expires` − `reg_delay_before_refresh`. | §7. |
 
 ---
@@ -348,7 +381,8 @@ Enabled by default on TCP/TLS (§1.5). Verified present: `+sip.instance` and `re
 detection in the 2xx (`:2839-2868`), `Flow-Timer` parsed and given priority over `ka_interval`
 (`:2740-2760, 2807`), disconnect → re-register (`:5311-5355`).
 
-Gaps, both minor for us: **439 is not handled** (§6), and UDP keep-alive is raw CRLF rather than
+Gaps: **439 was not handled** — now fixed upstream by #5154/#5168, pending a `swift-pjsip` bump (§6) —
+and UDP keep-alive is raw CRLF rather than
 RFC 5626 §4.4.2's STUN Binding ("Clients MUST support STUN-based keep-alives") — pjsip implements
 only §4.4.1, and its 15 s default is more aggressive than the RFC's 24–29 s. Neither changes the
 precedence design; both are worth knowing before we tune battery.
@@ -373,9 +407,15 @@ Engine-side, none of it Model-B-specific — all of it is "expose what pjsua alr
    state event, so §7.2/§7.3 can be app-side without reaching into C.
 6. **Document the §1.1 table** where `reRegister` is documented — the "which fields cost a binding"
    question will be asked again.
+7. *(added 2026-08-17)* **Bump `swift-pjsip` past `77ad3feec` + `716ef557d`** so the 439 fix is
+   actually in the binary — until then TD-22 is discharged upstream but still live for us, and the
+   §6 row is theoretical rather than fixed. This is the single highest-value item on this list,
+   because it converts a "registration fails forever with an unrecognised status code" field
+   failure into a non-event.
 
 New tech-debt entries proposed: **TD-21** (`disable_reg_on_modify` regc destruction — engine must
-never use it as a quiet-apply), **TD-22** (439 → outbound fallback), **TD-23** (the `EBUSY` tail).
+never use it as a quiet-apply), **TD-22** (439 → outbound fallback; **discharged upstream 2026-08**,
+awaiting the binary bump), **TD-23** (the `EBUSY` tail), **TD-25** (regc mutability, §1.2a).
 
 ---
 
@@ -414,5 +454,33 @@ these are the load-bearing ones.
   **aborted with "ran out of tool calls" and returned no answer** — the second despite being
   deliberately narrowed. Operational note for the next pass: **follow up inside an existing thread
   rather than asking cold**; the thread with accumulated context completed, both cold asks did not.
-- **Related:** `swift-pjsua/docs/Tech-Debt.md` TD-20 · `swift-pjsua/docs/Configuration-Design.md`
-  D-CONFIG-4 · `offhook/docs/Provisioning-Models.md` §B.1 · `offhook/docs/SIP-Test-Infrastructure.md`
+- **Related:** `../../swift-pjsua/docs/Tech-Debt.md` TD-20/21/22/23/25 ·
+  `../../swift-pjsua/docs/Configuration-Design.md` D-CONFIG-4 ·
+  `offhook/docs/Provisioning-Models.md` §B.1 · `offhook/docs/SIP-Test-Infrastructure.md` ·
+  `VoIP/TASK-code-pjsip-disable-reg-on-modify.md`
+
+### Revision 2026-08-17
+
+Three substantive changes, each marked inline where it lands.
+
+1. **The 439 gap is fixed upstream** — by our own PRs
+   [#5154](https://github.com/pjsip/pjproject/pull/5154) (`77ad3feec`) and
+   [#5168](https://github.com/pjsip/pjproject/pull/5168) (`716ef557d`). §6 and §7.4 updated; the
+   app-side mitigation this document used to prescribe must **not** be built. Pending a
+   `swift-pjsip` binary bump — §8 item 7, and now the highest-value item on that list.
+2. **`disable_reg_on_modify` is deliberate, not inconsistent** —
+   [#4509](https://github.com/pjsip/pjproject/pull/4509) moved the guard on purpose; only the doc
+   comment is stale. §1.2 updated. The 08-04 upstream draft proposed reverting it, which would have
+   been an own goal against a maintainer's own `type: bug` fix. The rule that came out of it:
+   **run `git log -S"<symbol>" --all` on any flag before writing an issue about its behaviour.**
+3. **New §1.2a** — most of `pjsip_regc` is mutable in place, so the `unreg_first` cost is a pjsua
+   policy rather than a protocol necessity. Changes no decision in §2; opens an optional upstream
+   enhancement (Deliverable B of the handoff) and `swift-pjsua` TD-25.
+
+**DeepWiki, second data point on the same lesson.** A four-part question about the fix **aborted
+again** on tool budget, and the engine itself asked for a narrower one. Re-asked as a single
+question about `pjsip_regc` mutability inside the existing misuse-sweep thread
+([`…_bb8d7a19`](https://deepwiki.com/search/misuse-sweep-for-that-same-cla_bb8d7a19-cc1b-44fb-bd24-32dd7d442b8e?mode=deep))
+— **completed, and every claim independently verified against `sip_regc.h` / `sip_reg.c`.** The
+rule is now firm: *one topic per deep ask, and follow up inside an existing thread.* Score so far
+on `pjsip/pjproject`: 2 of 2 single-topic follow-ups completed, 0 of 3 multi-part asks.

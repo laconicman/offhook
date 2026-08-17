@@ -1,6 +1,6 @@
 # Credentials — Keychain behind `CredentialStore`
 
-**Status: research complete, 2026-07-26.** Answers `TASK-cowork-async-keychain-library.md`
+**Status: research complete, 2026-07-26.** Answers `../../TASK-cowork-async-keychain-library.md`
 ("can we make our own `@KeychainStorage`-style **async** SPM library?").
 
 **Verdict: adopt [dm-zharov/swift-security][sws] as-is; write one ~70-line file in Offhook;
@@ -144,7 +144,7 @@ for ungated settings display; it is unusable for the engine and unusable for gat
 
 swift-security is a single-maintainer package. The mitigation is the seam we already built:
 `CredentialStore` is one method, so replacing the library is a one-file change. That
-reversibility is precisely why the protocol exists (`swift-pjsua/docs/Configuration-Design.md`
+reversibility is precisely why the protocol exists (`../../swift-pjsua/docs/Configuration-Design.md`
 §4, D-CONFIG-1).
 
 **`laconicman/swift-security` is currently an unmodified mirror.** The consult found every
@@ -402,7 +402,7 @@ It therefore *cannot* see Offhook's default-group items, and making it able to w
 a Keychain Sharing capability to a generated test runner.
 
 > **D-CRED-2.** Don't. The integration suite keeps its current credential source —
-> `OFFHOOK_TEST_ACC<n>_*` env vars, then `../secrets/test-accounts.env` outside the repo
+> `OFFHOOK_TEST_ACC<n>_*` env vars, then `../../secrets/test-accounts.env` outside the repo
 > (`Tests/TestAccounts.swift`). It is CI-friendly, needs no entitlements, and keeps test
 > credentials out of the device keychain. Keychain is the **app's** persistence, not the tests'.
 

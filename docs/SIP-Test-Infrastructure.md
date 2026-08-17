@@ -19,7 +19,7 @@ Register one free account, then type its values into Offhook's three fields + a 
 Expected: register → `registered (200)`; dial → `confirmed` / media `active` → **you hear your
 own voice**. Flexisip negotiated **iLBC** with our binary (SIP-verified 2026-07-04); G.711
 (PCMU/PCMA) elsewhere — Opus is absent from the current binary
-(`../swift-pjsip/docs/Codec-Coverage.md`). Offhook defaults to option **A**.
+(`../../swift-pjsip/docs/Codec-Coverage.md`). Offhook defaults to option **A**.
 
 > **Loopback pattern** (SIP-verified 2026-07-04; automated by `../Tests/`): register **two**
 > accounts on the same registrar and call one from the other. The INVITE goes out to the real
