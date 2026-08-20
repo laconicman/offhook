@@ -27,6 +27,12 @@ See the smoke procedure in [README](../README.md) and endpoints in
 - **Debug / SIP tooling UI** — raw event stream, conference-slot inspector, live SIP log. Include
   the per-call setup timeline (created→confirmed→media→first mic sample) once the engine reports
   it — [OH-9](./Tech-Debt.md).
+- **Call-liveness detection** — poll RX packet counters on the active call and surface a stalled-media
+  state. Not polish: pjsip never reports that an established call's transport or media died, so
+  without this the app shows a dead call as connected indefinitely —
+  [OH-10](./Tech-Debt.md), mechanism in
+  `../../swift-pjsua/docs/Call-Termination-Paths.md` §4. Shares one poll with the in-call quality
+  indicator ([Call-Quality-Statistics](./Call-Quality-Statistics.md) §2.4).
 - **Feature demos** — hold, parallel calls, local-mix and server-focus conference, video.
   Transfer, when it lands, must be **attended from the first version**, not blind-only with
   attended retrofitted (*Source: [Prior-Art](./Prior-Art.md) §1.4*).
@@ -43,9 +49,14 @@ own; none blocks another.
 - **Account-settings UX** — a realistic example under every SIP field plus inline help. Username vs
   Login vs Domain vs Server is where users get stuck, and it is a UI problem, not a docs problem.
   *(§1.3)*
-- **Call statistics** — reduce over call history into incoming/outgoing/missed plus total duration
-  for day/week/month; no aggregation table. Ship it with the **excluded-numbers filter**, which is
-  what stops test extensions from distorting the numbers. *(§1.3)*
+- **Call statistics & call quality** — designed in
+  [Call-Quality-Statistics](./Call-Quality-Statistics.md) (2026-08-17). One immutable record per
+  stream captured at `on_stream_destroyed`, stored raw in an append-only file; **no MOS** — the
+  components, because G.107 disclaims per-call opinion prediction. The consumer-facing
+  incoming/outgoing/missed donut falls out of the same data as a `reduce`, and ships with the
+  **excluded-numbers filter** that stops test extensions distorting it *(§1.3)*. Blocked on
+  `swift-pjsua` wiring `on_stream_destroyed` and exposing the jitter-buffer stats it already
+  discards (`swift-pjsua` TD-26) — see that doc §10.
 - **Separate ring device from call-audio device** — otherwise incoming calls are inaudible whenever
   the headset is off the head. *(§1.3)*
 - **Mic Mode panel** — explain Standard / Voice Isolation / Wide Spectrum and deep-link to Control

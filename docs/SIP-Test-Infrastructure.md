@@ -35,7 +35,7 @@ own voice**. Flexisip negotiated **iLBC** with our binary (SIP-verified 2026-07-
 | **Linphone** | `sip.linphone.org` | UDP/TCP/TLS | ZRTP/SRTP | ~~`4443` (echo)~~ **404** as of 2026-07-04 — use the two-account loopback (§0) | register, audio, **video**, **server conference** (native acct), **push** (self-host, §3) |
 | **sip2sip.info** | `sip2sip.info` | UDP/TCP/TLS | SRTP | `4444` mic, `3333` A/V, `echo@conference.sip2sip.info` (RTP+MSRP echo), `<room>@conference.sip2sip.info` (ad-hoc SylkServer conference) | register, echo, video, ICE/STUN, presence, **multi-party conference** (status page: operational, May 2026) |
 | **iptel.org** | `iptel.org` | UDP/TCP | — | `echo@iptel.org`, `music@iptel.org` | register, echo (Kamailio home turf) |
-| **antisip** | `sip.antisip.com` | UDP/TCP/TLS | SRTP | `thetestcall@sip.antisip.com` (callable without an account) | register, echo, RTP/media edge cases |
+| **antisip** | `sip.antisip.com` | UDP/TCP/TLS | SRTP | ~~`thetestcall@sip.antisip.com`~~ **404 "User Is Offline"** (Kamailio 5.8.8), verified 2026-08-19 — register still works | register, RTP/media edge cases |
 | **OnSIP** | `sip.onsip.com` | UDP/TCP/TLS | SRTP | `echo` test app on the account | register, audio/video, IM — free plan still advertised, signup flow **re-check** |
 
 ### Commercial / PSTN-connected (real telco, exercise NAT, SRV, TLS)
@@ -214,6 +214,44 @@ fully control for the M3 feature demos.
   dropped **silently**; the call just never confirms. Fix: register **and** dial with
   `;transport=tcp` (swift-pjsua now always opens a TCP listener beside UDP; its TD-16 tracks
   proper outbound-proxy support).
+  **Reproduced on a second provider, 2026-08-19** — so it is our stack's behaviour, not Flexisip's.
+  Calling `sip:thetestcall@sip.antisip.com` from ACC4 over UDP: initial INVITE **1289 B** (under
+  pjsip's 1300 threshold) → `407` answered normally → authenticated resend **1578 B** → sent over
+  UDP anyway, retransmitted 5×, never answered, call times out. Identical shape at
+  `sip.linphone.org` (1322 B → 407 → 1634 B).
+
+  **Consequence for testing: we cannot place an authenticated call over UDP to any provider**, so
+  the UDP rows of the call-termination taxonomy are unreachable from this stack until the INVITE
+  fits or the switch works. That blocked the planned UDP transport-death run
+  (`../../swift-pjsua/docs/Call-Termination-Paths.md` row 16).
+
+  **Root cause found 2026-08-19, and it is ours, not pjsip's.** `swift-pjsip/scripts/config_site.h`
+  sets `#define PJSIP_DONT_SWITCH_TO_TCP 1` (upstream default is **0**). That is consulted at
+  `sip_util.c:1419` — `if (pjsip_cfg()->endpt.disable_tcp_switch==0 && …)` — and it guards the
+  **entire** RFC 3261 §18.1.1 block, size check and TCP-transport lookup included. So the switch
+  never runs at all: the oversized authenticated resend goes out on UDP by configuration.
+
+  This supersedes the closing analysis in
+  `../../swift-pjsua/Upstream/closed-udp-tcp-switch-not-reapplied-on-auth-resend.md`, which
+  attributed our symptom to the switch running and finding no TCP transport to acquire. On this
+  binary the switch is disabled before it can look. (The upstream logging PR that came out of that
+  investigation, pjproject#5076, is unaffected — the path it instruments is real and reachable by
+  any app that leaves the switch enabled. What was wrong was our attribution of *our* symptom
+  to it.)
+
+  **Fixed 2026-08-19 at runtime**, no rebuild: `swift-pjsua` now sets
+  `pjsip_cfg()->endpt.disable_tcp_switch = 0` in `PJSUA.start()`. Verified immediately — the same
+  antisip call that had been swallowed by fragmentation now switches the authenticated INVITE to
+  TCP (`INVITE/cseq=5418 … to TCP 5.39.72.109:5060`) and gets a real answer. The loopback suite
+  (test03/04/07) passes unchanged, so nothing regressed.
+
+  **Two consequences worth knowing.** The `;transport=tcp` advice above is still the right default
+  — it keeps *inbound* requests off UDP too, which the switch cannot help with. And an
+  authenticated call now **leaves UDP by design**: since our INVITE crosses 1300 bytes once the
+  digest is added, §18.1.1 moves it to TCP every time. So this stack effectively never carries an
+  authenticated dialog over UDP, which is correct behaviour and also why UDP transport-death
+  testing stays out of reach (`../../swift-pjsua/docs/Call-Termination-Paths.md` §6.5).
+
 - **SRV vs A record** — some providers publish no SRV; an SRV-only resolver fails to register.
   Fall back to A/AAAA (roadmap M2 / TD-14). VoIP.ms is a good SRV test.
 - **NAT / symmetric RTP** — without STUN/ICE you may register fine but get one-way/no audio
@@ -227,6 +265,155 @@ fully control for the M3 feature demos.
   = `BadDeviceToken`. Second-biggest push trap.
 - **iOS 13+ CallKit reporting** — a VoIP push not reported to CallKit immediately gets the app
   terminated and future pushes dropped; symptoms look like "push stopped working".
+- **`dig` / `host` lie behind a full-tunnel VPN** (2026-08-18) — both talk to a nameserver
+  directly and time out, so a resolution check "fails" while the stack resolves the host fine.
+  Use `dscacheutil -q host -a name <host>`, which asks the same system resolver the app does.
+- **The simulator has no network of its own.** It shares the Mac's stack, so host-level pf rules,
+  VPN routes and DNS apply to it unchanged — which is what makes §7 possible, and also means the
+  Mac's VPN is silently in the path of every "live SIP" result (our SDP origin line carried the
+  tunnel address `198.18.0.1`, not a LAN address).
+
+## 7. Failure injection — breaking the network on purpose
+
+Most of the call-lifecycle taxonomy in `../../swift-pjsua/docs/Call-Termination-Paths.md` is about
+what happens when a transport dies **without** a SIP goodbye. No amount of app-side testing
+produces that: you have to kill the network under a live call and watch. `scripts/pf-blackhole.sh`
+is that lever.
+
+### 7.1 Why pf, and not the obvious alternatives
+
+| Lever | Reach | Verdict |
+|---|---|---|
+| **`pfctl`** | one host, or one *protocol* to one host | **Chosen.** Surgical enough to drop RTP while leaving signalling up (the only way to observe rows 9–13); nothing else on the machine is disturbed. Costs one `sudo` per window. |
+| Wi-Fi off (`networksetup -setairportpower`) | everything | Kills the VPN with it — which may need a manual reconnect — and cannot separate signalling from media. Fine as a fallback, blunt. |
+| Airplane mode on a device | everything, plus iOS socket suspension | The most *realistic* case and the right one for the backgrounded re-run, but needs a device build and two taps mid-experiment. |
+| A local SIP proxy the test dials through | one dialog | Rejected. Routing a dialog through `127.0.0.1` transparently means rewriting the Request-URI **and** the Record-Route/Contact of every response, or the ACK and BYE leave via the real server and the isolation evaporates. A mini-ALG for less isolation than one pf rule. |
+
+### 7.2 The script
+
+```sh
+sudo offhook/scripts/pf-blackhole.sh all      # signalling AND media — a dead network
+sudo offhook/scripts/pf-blackhole.sh udp      # RTP only; SIP/TCP stays up
+sudo offhook/scripts/pf-blackhole.sh tcp      # signalling only; RTP keeps flowing
+```
+
+It waits to be **armed** rather than blocking on launch, so you type the password up front and the
+driver picks the moment to the second:
+
+```sh
+sudo offhook/scripts/pf-blackhole.sh all &   # password now, then it waits
+# …start the observation run; wait for its [OBSERVE] CALL-UP marker…
+touch /tmp/offhook-pf/arm                    # block
+touch /tmp/offhook-pf/release                # restore (or let the hard cap do it)
+```
+
+Four things make it safe to run against your own machine: it restores on **every** exit path
+(release, hard cap, Ctrl-C, SIGTERM); it keeps Apple's ruleset and appends a `quick` rule, so
+restoring is a plain reload of `/etc/pf.conf`; it gives back the `pfctl -E` token, so pf ends
+disabled if it started disabled; and startup clears any stale arm file, so a leftover can never
+blackhole the network the instant you authenticate. Manual undo if a run is killed outright:
+`sudo pfctl -f /etc/pf.conf && sudo pfctl -d`.
+
+### 7.3 Things that are true and not obvious
+
+- **pf sees the packets before they enter the VPN** — verified 2026-08-18 with a full-tunnel VPN
+  holding the default route (`utun4`). This is not safe to assume, so the script probes after
+  blocking and prints a loud `WARNING … THE BLOCK IS NOT WORKING` if the port is still reachable.
+  A run that skipped that check could look like a stack finding when it is a plumbing failure.
+- **`block drop` is a silent discard** — no RST, no ICMP unreachable. That is the whole point:
+  anything sent back is a notification, and the question under test is what happens when there is
+  none.
+- **Both directions need a rule.** An inbound packet from the server has *us* as its destination,
+  so a `to` rule alone leaves the peer able to talk to a socket we can no longer answer on.
+- **Never let a driver assume it armed the lever.** The first attempt at the §2 run lost 20 minutes
+  to a silent no-op: the script created its run directory as root (0755), the unprivileged driver's
+  `touch …/arm` failed with `EACCES`, and the driver logged "ARMED" anyway — producing a trace that
+  looked like a *stack* finding ("nothing fired!") when nothing had been blocked. The directory is
+  now `1777` and the driver waits for pf's own `BLOCKED` line before proceeding. The general rule:
+  a failure-injection harness must confirm the injection, because its success case and its
+  plumbing-failure case look identical in the output.
+- **Flexisip puts signalling and media on the same host** — `sip.linphone.org` →
+  `176.31.149.179`, TCP 5060 for SIP and the MediaRelay's UDP ports on the same address — which is
+  what makes the `udp` / `tcp` split work as a clean separation. Elsewhere, read the `c=` line of
+  the SDP before assuming it.
+
+### 7.4 Driving it from the test suite
+
+`../Tests/CallLifecycleObservationTests.swift` holds the runs. They are instruments, not
+assertions: each drives a real call into a chosen condition and prints a timestamped trace, so a
+source-derived claim can be confirmed or refuted. Opt-in via `OFFHOOK_OBSERVE=1`, run alone:
+
+```sh
+TEST_RUNNER_OFFHOOK_OBSERVE=1 xcodebuild test-without-building -scheme Offhook \
+  -destination 'platform=iOS Simulator,name=iPhone 16 Pro,OS=18.5' \
+  -only-testing:OffhookTests/CallLifecycleObservationTests/test20_sessionTimerAndHoldResumeRecords
+```
+
+Markers are `[OBSERVE] HH:mm:ss.SSS …` (host-visible checkpoints a driver can wait on) and
+`[EVENT] HH:mm:ss.SSS …` (every `PJSUAEvent`, traced by `EngineHarness`). Both carry a local wall
+clock so the trace lines up with `date` on the Mac. The observation class registers its own
+loopback pair, so it never needs the ordered suite's `test03` and never touches the slot ≥ 3
+accounts that rate-limit (see the etiquette note in §6).
+
+## 8. Observed on the wire (per endpoint)
+
+### 8.1 Session timer (RFC 4028) — `sip.linphone.org` / Flexisip
+
+Observed 2026-08-18 in the pjsip log of a loopback call. **Negotiated.**
+
+| | Value | Evidence |
+|---|---|---|
+| Offer (our INVITE) | `Supported: … timer`, `Session-Expires: 1800`, `Min-SE: 90` | TX `INVITE/cseq=12434` |
+| Answer (200 OK) | `Require: timer`, `Session-Expires: 1800;refresher=uac` | RX `200/INVITE/cseq=12435` |
+| Refresher | **UAC** — the caller | `refresher=uac` |
+| First refresh | **~900 s** = `sess_expires / 2` | `sip_timer.c:517` |
+
+**Read this carefully before relying on it.** The loopback pair means *both* user agents are our
+own pjsua, so what is proven is that **Flexisip passes RFC 4028 through untouched** — it is a
+proxy here, not a B2BUA, and it did not strip `timer` or rewrite the interval. It says nothing
+about whether an arbitrary third-party peer would accept one. Against a peer that declines, the
+"up to ~15 min" row in `../../swift-pjsua/docs/Call-Termination-Paths.md` §4 becomes **never**.
+
+Consequence for that table: for this endpoint pair the row is real, and the number is **900 s** —
+that is how long an idle call over a dead transport can sit before *anything* in the stack tries
+to use the dialog again. **Observed end to end 2026-08-18** (§4.1 of that document): the refresh
+went out as an **UPDATE**, not a re-INVITE, at 897 s — and since an UPDATE that changes nothing
+triggers no media teardown, it produces no statistics record either. On a *healthy* call the
+refresh completed in 320 ms and was invisible to the app; on a dead transport it took a further
+83 s to become a `.disconnected` event.
+
+`sip2sip.info` and `iptel.org` are unmeasured — they need a call to a third-party UA or an echo
+service, not a loopback pair.
+
+**Why the refresh was an `UPDATE` and not a re-INVITE — it is entirely peer-driven.** At the moment
+the refresh timer fires, `timer_cb()` branches on one field, `inv->timer->use_update`
+(`sip_timer.c:396`), and that field is computed once per timer (re)start as:
+
+```c
+/* sip_timer.c:488-490 */
+inv->timer->use_update = (pjsip_dlg_remote_has_cap(inv->dlg, PJSIP_H_ALLOW, NULL,
+                                                   &UPDATE) == PJSIP_DIALOG_CAP_SUPPORTED);
+```
+
+i.e. purely "did the peer's cached `Allow` header list `UPDATE`". If not, it falls back to a
+re-INVITE (and forces SDP on it, since an INVITE always carries one). **There is no pjsua1 knob for
+this** — an application can turn session timers on or off (`PJSIP_INV_SUPPORT_TIMER` /
+`REQUIRE_TIMER`) but cannot choose the refresh method. So expect `UPDATE` against modern peers and
+a re-INVITE against older ones, with no configuration involved either way. Note this is about the
+**session timer**, not registration: a registration refresh is always a re-REGISTER, never an
+UPDATE — UPDATE is a mid-dialog method and has no meaning outside an INVITE dialog.
+(DeepWiki deep consult 2026-08-19, re-verified against the fork.)
+
+### 8.2 Codec and media path
+
+`iLBC/8000` mode=30, re-confirmed 2026-08-18 (matches the 2026-07-04 observation). Media relays
+through Flexisip's MediaRelay rather than flowing peer-to-peer, so both directions traverse
+`176.31.149.179` — convenient for §7, and the reason the measured RTT is dominated by the relay.
+
+Our INVITE also offers a second m-line, `m=text` (T.140 real-time text), which the binary
+negotiates and starts alongside audio. It is invisible to the statistics API: `on_stream_destroyed`
+is an **audio** callback, so a text stream is torn down without producing a record, and
+`CallMediaInfo.Kind` surfaces it as `unknown(3)`.
 
 ## Sources
 - SIP2SIP status + test endpoints — <https://sip2sip.info/> · <https://sip2sip.info/help/> · <http://wiki.sip2sip.info/projects/sip2sip/wiki/SipTesting> · SylkServer conferencing <https://sylkserver.com/documentation/sip-conferencing/>
