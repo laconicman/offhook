@@ -221,6 +221,46 @@ final class OffhookIntegrationTests: XCTestCase {
         }
     }
 
+    // MARK: 07 — a local hangup must still produce a statistics record
+
+    /// Pins undocumented ordering inside `pjsua_call_hangup()`: it calls
+    /// `pjsua_media_channel_deinit()` **before** setting `call->hanging_up = PJ_TRUE`
+    /// (`pjsua_call.c:3410-3414`), and `on_stream_destroyed` is guarded by `!hanging_up`
+    /// (`pjsua_aud.c:553`). Hoisting that assignment three lines would silently delete the
+    /// end-of-call statistics record for **every locally ended call** — no compile error, no
+    /// other test in this suite failing. This test is the only thing that would notice.
+    ///
+    /// Filtering to the caller leg is the point: the callee leg is torn down by the BYE, which
+    /// is a different path (`Call-Termination-Paths.md` row 2) and would pass even if the local
+    /// path were broken.
+    func test07_localHangupProducesStatisticsRecord() async throws {
+        let (caller, calleeAOR) = try Self.loopbackPair()
+        let call = try await harness.engine.makeCall(to: calleeAOR, from: caller)
+        try await harness.waitForCallState(call, .confirmed)
+        try await harness.waitForActiveMedia(call, kind: .audio)
+        try await Task.sleep(for: .seconds(3)) // let RTP flow, so the record carries real counters
+
+        let seen = await harness.streamRecords.count
+        try await harness.engine.hangup(call)
+        let record: EngineHarness.StreamRecord
+        do {
+            record = try await harness.waitForStreamRecord(of: call, after: seen)
+        } catch is EngineHarness.Timeout {
+            return XCTFail("no on_stream_destroyed record for a locally hung-up call — the "
+                           + "deinit-before-hanging_up ordering in pjsua_call_hangup() is gone")
+        }
+        try await harness.waitForCallState(call, .disconnected)
+
+        // Non-zero counters prove the stream was still fully constructed when the callback ran,
+        // not already torn down to zeros — the other half of what makes the record trustworthy.
+        XCTAssertGreaterThan(record.statistics.transmit.packets, 0,
+                             "record captured, but with empty counters")
+        XCTAssertFalse(record.statistics.codec.name.isEmpty)
+        print("[stats] hangup record: \(record.statistics.codec) "
+              + "tx \(record.statistics.transmit.packets) pkt, "
+              + "rx \(record.statistics.receive.packets) pkt")
+    }
+
     // MARK: helpers
 
     /// The registered same-domain pair: ACC1's AccountID (caller) + ACC2's dial URI (callee,
