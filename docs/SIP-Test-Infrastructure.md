@@ -385,6 +385,17 @@ eight-slot secrets file, and slots 5–8 (the extra Linphone legs for conference
 `sip2sip.info`) cannot be used. Not a regression — 2.16.0 also had 4 — but the config change did
 not buy what it was meant to. Belongs to `swift-pjsip`'s round, not the suite's.
 
+**Handed off** to `../../TASK-code-pjsua-max-acc-module-mismatch.md`, which carries the ruled-out
+list, the two-command clang reproduction to try, and the deduction that drives it: the value can
+only be 4 if `config_site_sample.h` was reached with `PJ_CONFIG_IPHONE` set **and** our override
+skipped — so the module build read a `config_site.h` that is not ours, which is findable with
+`clang -H`.
+
+**Do not fix this by hardcoding 8 in `swift-pjsua`.** `PJSUA_MAX_ACC` sizes a fixed array inside
+the `pjsua_var` singleton (unlike `PJSUA_MAX_CALLS`, which is only a ceiling), so a guard that is
+*too high* would index past the end of that array. Today's direction — Swift low, library high — is
+the safe one; the mirror case is silent memory corruption.
+
 ## 8. Observed on the wire (per endpoint)
 
 ### 8.1 Session timer (RFC 4028) — `sip.linphone.org` / Flexisip
