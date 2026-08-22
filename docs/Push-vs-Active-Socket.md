@@ -111,7 +111,7 @@ Three things follow, all verified:
    > either `pjsua.h` or `pjsua2/account.hpp`. **Encouragingly, #4509's rationale is our design:**
    > apply the settings, let the *next* registration carry them — precisely the pending-config slot
    > drained on last-call-end in §2. We just have to own the re-registration.
-   > → upstream note [`draft-acc-modify-disable-reg-still-destroys-regc`](../../swift-pjsua/Upstream/draft-acc-modify-disable-reg-still-destroys-regc.md),
+   > → upstream note [`acc-modify-disable-reg-still-destroys-regc`](../../swift-pjsua/Upstream/acc-modify-disable-reg-still-destroys-regc.md),
    > handoff `TASK-code-pjsip-disable-reg-on-modify.md`.
 
 ### 1.2a How much of the teardown is actually necessary *(added 2026-08-17)*
@@ -308,7 +308,7 @@ So H2's real question is **what we must do on wake**:
 | **Unregister-then-register races an inbound INVITE** | Binding is genuinely gone for the gap (§1.2.1); if the INVITE lands in the gap it is still answerable, but with a synthesised Contact (§1.3). | Row 6 makes the gap impossible while a call is up. For the no-call case, accept the gap but keep it short — do not interleave other work. |
 | **Re-registration fails after a config change** | The account is left unregistered **and the config is not rolled back** (already documented at `Configuration-Design.md` D-CONFIG-4). Auto-retry only fires for 408/480/500/502/503/504/6xx (`pjsua_acc.c:3137-3148`). | Keep the previous known-good `AccountConfiguration` and re-apply it on a non-retryable failure. This is app-side; pjsua will not do it. |
 | **`disable_reg_on_modify` used to "apply quietly"** | Silently expires the registration (§1.2.3). | Do not use it for this. If we ever need a truly signalling-free apply, the only safe fields are §1.1's silent column. |
-| **439 (First Hop Lacks Outbound Support)** | ~~Defined (`sip_msg.h:506`) but never acted on~~ — **fixed upstream 2026-08 by our own PRs [#5154](https://github.com/pjsip/pjproject/pull/5154) (`77ad3feec`) and [#5168](https://github.com/pjsip/pjproject/pull/5168) (`716ef557d`)**: pjsua now retries registration without SIP outbound on 439, and a first-hop change clears the sticky rejection (`first_hop_changed` → `reset_outbound_rejection()` in `pjsua_acc_modify()`). | **Do not build the app-side mitigation this row used to prescribe.** Still latent until `swift-pjsip` ships a binary carrying both commits — `swift-pjsua` TD-22. Note: [`pjproject-5154`](../../swift-pjsua/Upstream/pjproject-5154-439-first-hop-lacks-outbound.md). |
+| **439 (First Hop Lacks Outbound Support)** | ~~Defined (`sip_msg.h:506`) but never acted on~~ — **fixed upstream 2026-08 by our own PRs [#5154](https://github.com/pjsip/pjproject/pull/5154) (`77ad3feec`) and [#5168](https://github.com/pjsip/pjproject/pull/5168) (`716ef557d`)**: pjsua now retries registration without SIP outbound on 439, and a first-hop change clears the sticky rejection (`first_hop_changed` → `reset_outbound_rejection()` in `pjsua_acc_modify()`). | **Do not build the app-side mitigation this row used to prescribe.** Still latent until `swift-pjsip` ships a binary carrying both commits — `swift-pjsua` TD-22. Note: [`pjproject-5154`](../../swift-pjsua/Upstream/439-first-hop-lacks-outbound.md). |
 | **Proxy demands more refresh lead time than our margin** | `sip.pnsreg` indicator is never parsed (TD-20); pjsua schedules purely from `Expires` − `reg_delay_before_refresh`. | §7. |
 
 ---

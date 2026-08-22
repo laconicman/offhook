@@ -75,8 +75,9 @@ xcodebuild test -scheme Offhook -destination 'platform=iOS Simulator,name=iPhone
 **Credentials** (never in this repo): `OFFHOOK_TEST_ACC<n>_AOR` / `_PASSWORD`
 (+ optional `_REGISTRAR` override) read from the process **environment first** (CI:
 `TEST_RUNNER_`-prefixed vars via xcodebuild), then from `../secrets/test-accounts.env` —
-outside the repo tree. ACC1+ACC2 must be a same-registrar pair (the loopback). The suite is one
-ordered test class: pjsua is process-global, so one engine instance serves all tests.
+outside the repo tree. ACC1+ACC2 must be a same-registrar pair (the loopback); slots 3–8 are
+optional extras — tests that need them `XCTSkip` when unset. The suite is one ordered test
+class: pjsua is process-global, so one engine instance serves all tests.
 
 **Live-infra weather:** these tests hit real public servers. Back-to-back runs can trip
 provider rate limits (observed: iptel going silent → 408 after many runs in one hour); the

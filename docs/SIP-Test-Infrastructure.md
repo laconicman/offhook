@@ -33,7 +33,7 @@ own voice**. Flexisip negotiated **iLBC** with our binary (SIP-verified 2026-07-
 | Service | Domain | Transports | SRTP | Test endpoints | Good for |
 |---|---|---|---|---|---|
 | **Linphone** | `sip.linphone.org` | UDP/TCP/TLS | ZRTP/SRTP | ~~`4443` (echo)~~ **404** as of 2026-07-04 — use the two-account loopback (§0) | register, audio, **video**, **server conference** (native acct), **push** (self-host, §3) |
-| **sip2sip.info** | `sip2sip.info` | UDP/TCP/TLS | SRTP | `4444` mic, `3333` A/V, `echo@conference.sip2sip.info` (RTP+MSRP echo), `<room>@conference.sip2sip.info` (ad-hoc SylkServer conference) | register, echo, video, ICE/STUN, presence, **multi-party conference** (status page: operational, May 2026) |
+| **sip2sip.info** | `sip2sip.info` | UDP/TCP/TLS | SRTP | `4444` mic, `3333` A/V, `echo@conference.sip2sip.info` (RTP+MSRP echo), `<room>@conference.sip2sip.info` (ad-hoc SylkServer conference) | register, echo, video, ICE/STUN, presence, **multi-party conference** (signup verified working 2026-08-22 — no captcha, instant; but its backend **rejects `+` plus-aliased e-mails**, which reads as a generic "invalid input data value") |
 | **iptel.org** | `iptel.org` | UDP/TCP | — | `echo@iptel.org`, `music@iptel.org` | register, echo (Kamailio home turf) |
 | **antisip** | `sip.antisip.com` | UDP/TCP/TLS | SRTP | ~~`thetestcall@sip.antisip.com`~~ **404 "User Is Offline"** (Kamailio 5.8.8), verified 2026-08-19 — register still works | register, RTP/media edge cases |
 | **OnSIP** | `sip.onsip.com` | UDP/TCP/TLS | SRTP | `echo` test app on the account | register, audio/video, IM — free plan still advertised, signup flow **re-check** |
@@ -232,7 +232,7 @@ fully control for the M3 feature demos.
   never runs at all: the oversized authenticated resend goes out on UDP by configuration.
 
   This supersedes the closing analysis in
-  `../../swift-pjsua/Upstream/closed-udp-tcp-switch-not-reapplied-on-auth-resend.md`, which
+  `../../swift-pjsua/Upstream/udp-tcp-switch-not-reapplied-on-auth-resend.md`, which
   attributed our symptom to the switch running and finding no TCP transport to acquire. On this
   binary the switch is disabled before it can look. (The upstream logging PR that came out of that
   investigation, pjproject#5076, is unaffected — the path it instruments is real and reachable by
@@ -354,6 +354,36 @@ Markers are `[OBSERVE] HH:mm:ss.SSS …` (host-visible checkpoints a driver can 
 clock so the trace lines up with `date` on the Mac. The observation class registers its own
 loopback pair, so it never needs the ordered suite's `test03` and never touches the slot ≥ 3
 accounts that rate-limit (see the etiquette note in §6).
+
+## 7.5 `PJSUA_MAX_ACC` is 8 in the build and 4 in Swift — slots 5–8 are unusable
+
+Found by the 2.17.0 re-baseline, 2026-08-20, and unresolved. `swift-pjsip` 0.2.0 raises
+`PJSUA_MAX_ACC` to 8 (`scripts/config_site-ios.h:55-56`, `#undef` then `#define … 8`), which is what
+makes an eight-slot `secrets/test-accounts.env` worth having. It does not reach the engine:
+
+```
+test03 -> PJSUAUsageError.accountTableFull(capacity: 4)   # after adding ids 0,1,2,3
+```
+
+`PJSUA+Accounts.swift` guards with `pjsua_acc_get_count() < UInt32(PJSUA_MAX_ACC)`, so the value
+Swift compiled is 4. What is verified:
+
+| | |
+|---|---|
+| Shipped headers | `config_site.h:55-56` says **8**, in both slices |
+| Textual preprocessing | **8** — via `<pjsua-lib/pjsua.h>` *and* via the umbrella with `PJ_AUTOCONF=1` |
+| Compiled Swift constant | **4** |
+| Reproduces on a clean build | **yes** — fresh derived data *and* `ModuleCache.noindex` deleted; `PJSUA+Accounts.swift` demonstrably recompiled |
+| Artifact resolved | the 0.2.0 release zip, `PJSIP.xcframework-2.17.0-288de6142` |
+
+So the discrepancy is between **textual inclusion and the clang module** the Swift importer builds
+from — not a stale cache, not the wrong artifact. The umbrella's own comment ("Do NOT override
+config_site.h") hints the module's macro environment is not simply the textual one.
+
+**Consequence today:** the live suite can register **four** accounts, so `test03` fails against the
+eight-slot secrets file, and slots 5–8 (the extra Linphone legs for conference work, and
+`sip2sip.info`) cannot be used. Not a regression — 2.16.0 also had 4 — but the config change did
+not buy what it was meant to. Belongs to `swift-pjsip`'s round, not the suite's.
 
 ## 8. Observed on the wire (per endpoint)
 

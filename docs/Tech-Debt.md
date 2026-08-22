@@ -186,7 +186,7 @@ The user sees a running call timer, a "connected" label, and silence.
   An inbound call that dies is invisible for roughly twice as long as an outbound one.
 - *Related:* ICE keep-alive failure is the stack's only continuous liveness signal and needs
   [OH-4](#oh-4--no-stunice-configuration--deferred); upstream note:
-  `../../swift-pjsua/Upstream/draft-no-transport-death-notification-for-established-calls.md`.
+  `../../swift-pjsua/Upstream/no-transport-death-notification-for-established-calls.md`.
 
 ## See Also
 

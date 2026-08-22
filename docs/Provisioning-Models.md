@@ -124,29 +124,36 @@ against a binding established by an *earlier* REGISTER. So after a reboot with n
 So the real failure mode is *"VoIP survives until the registration expires, then stops until the
 phone is unlocked"* — not *"VoIP is dead after reboot"*.
 
-**Correction to an earlier claim in this doc's discussion (2026-08-04).** It was said that RFC 8599
-solves binding expiry because "the proxy owns waking you when a refresh is due". **On iOS that
-mechanism has no reliable transport, so the claim was wrong:**
+**How RFC 8599 actually handles this — corrected 2026-08-19.** An earlier note here claimed the
+RFC "assumes a PNS that can silently wake a UA on demand" and that its refresh model is
+"unimplementable on iOS as written". **Both were wrong**, and the distinction matters because it
+decides whether a lapsed binding is a problem at all. The RFC text contains **no** mention of
+silent, non-alerting, or user-invisible pushes — an APNs VoIP push *does* wake the device; it is
+simply not silent. The RFC has **two** push purposes, and only one of them is a problem on iOS:
 
-- A **PushKit VoIP push must result in a CallKit call** — since iOS 13 the app is terminated (and
-  repeat offenders lose the VoIP-push entitlement) if it does not report one. So a VoIP push cannot
-  be used to silently wake the app for a re-REGISTER; it would have to ring the user.
-- A **silent push** (`content-available`, background priority) *can* wake without UI but is
-  explicitly best-effort — throttled, coalescible, droppable, and dead if the user force-quit the
-  app. Not a foundation for keeping a binding alive.
-- **Background App Refresh** is opportunistic, arbitrarily late, and user-disableable.
+| RFC 8599 mechanism | What it does | On iOS |
+|---|---|---|
+| **§5.2 SIP Request Push Bucket** (reactive, call-triggered) | A request arrives for the UA → the proxy **pushes, stores the request in a bucket with a Bucket Timer, and forwards it once the UA's binding-refresh REGISTER arrives**. Measured round-trip in the RFC's own note: **~2 s**. | ✅ **Fully available.** This push announces a real call, so reporting it to CallKit is exactly right. |
+| **§5.5 Trigger Periodic Binding Refresh** (proactive) | With no call pending, the proxy pushes ≥120 s before expiry purely to make the UA re-REGISTER. | ❌ **Not available.** A PushKit push must result in a CallKit call, so a refresh-only push would have to ring the user; a silent push is best-effort and cannot be relied on. |
 
-RFC 8599 §4.1.4 even says that *absent* the `sip.pnsreg` indicator a UA "SHOULD only send a
-binding-refresh REGISTER request when it receives a push notification" — i.e. the RFC assumes a
-push service that can silently wake a UA on demand. **APNs is not that service for this purpose.**
+**The consequence is the reassuring one, and it matches the original instinct** that a
+push-reachable mobile UA should be treated as reachable rather than expired: under §5.2 **the
+binding does not need to be live when the call arrives.** The proxy pushes first and *waits* for
+the refresh REGISTER before forwarding — so a client that never self-refreshes is still reachable,
+provided the proxy implements the bucket. §4.1.4's "SHOULD only send a binding-refresh REGISTER
+when it receives a push notification" is therefore not a trap; it is the intended steady state for
+exactly our kind of client.
 
-The practical consequence, and it matches the original instinct that mobile registrations should not
-expire: on iOS the durable reachability is the **push-token binding held server-side**, not a live
-SIP registration. Infrastructure that grants long expiry (or treats the push token as the binding)
-works; infrastructure that demands a short refresh is structurally hostile to iOS clients, because
-the client cannot be woken to comply without ringing the user. Related engine hazard: **TD-24** —
-after suspension pjsip does not notice the OS killed its socket until a send fails or a 90 s
-keep-alive timer fires, so "we are registered" can be false on resume.
+So the provider taxonomy is sharper than "understands mobile or doesn't":
+
+- **Implements §5.2** → an iOS client that never self-refreshes works correctly. Nothing to fix.
+- **Pushes only while a binding is live, no bucket** → structurally hostile to iOS, because the one
+  mechanism that would keep the binding fresh (§5.5) is the one iOS forbids. This is the case worth
+  detecting early, and **U5** in `Push-vs-Active-Socket.md` §9 is the capture that reveals it.
+
+Related engine hazard, independent of any of this: **TD-24** — after suspension pjsip does not
+notice the OS killed its socket until a send fails or a keep-alive timer fires, so "we are
+registered" can be false on resume.
 
 **Mitigations available today:** negotiate the longest registration expiry the provider allows;
 re-register immediately on first unlock; treat "credential unavailable" as an expected,

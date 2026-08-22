@@ -644,7 +644,7 @@ Ordered by whether the design can proceed without it.
   session; "Extended R factor" = quality carried *outside* it), and an application computing R from
   its own reception statistics is computing the former. Reported as an observation with the reading
   of intent flagged — see §11.
-- **Both now live in the workspace's standard place for this,** `../../swift-pjsua/Upstream/` — as `draft-rtcp-xr-no-structured-pjsua1-accessor.md` and `draft-rtcp-xr-r-factor-has-no-writer.md`, following that folder's naming convention.
+- **Both now live in the workspace's standard place for this,** `../../swift-pjsua/Upstream/` — as `rtcp-xr-no-structured-pjsua1-accessor.md` and `rtcp-xr-r-factor-has-no-writer.md`, following that folder's naming convention.
 - Both are worth raising through the same channel as
   [pjproject#5178](https://github.com/pjsip/pjproject/pull/5178).
 
