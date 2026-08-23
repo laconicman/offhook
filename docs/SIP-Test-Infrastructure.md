@@ -355,46 +355,132 @@ clock so the trace lines up with `date` on the Mac. The observation class regist
 loopback pair, so it never needs the ordered suite's `test03` and never touches the slot ≥ 3
 accounts that rate-limit (see the etiquette note in §6).
 
-## 7.5 `PJSUA_MAX_ACC` is 8 in the build and 4 in Swift — slots 5–8 are unusable
+## 7.5 `PJSUA_MAX_ACC` was 8 in the build and 4 in Swift — the module map, not the config *(resolved)*
 
-Found by the 2.17.0 re-baseline, 2026-08-20, and unresolved. `swift-pjsip` 0.2.0 raises
-`PJSUA_MAX_ACC` to 8 (`scripts/config_site-ios.h:55-56`, `#undef` then `#define … 8`), which is what
-makes an eight-slot `secrets/test-accounts.env` worth having. It does not reach the engine:
+Found by the 2.17.0 re-baseline 2026-08-20; **resolved 2026-08-22**. `swift-pjsip` 0.2.0 raises
+`PJSUA_MAX_ACC` to 8 (`scripts/config_site-ios.h:55-56`, `#undef` then `#define … 8`), the library
+was built with 8 — and every Swift consumer compiled 4:
 
 ```
 test03 -> PJSUAUsageError.accountTableFull(capacity: 4)   # after adding ids 0,1,2,3
 ```
 
-`PJSUA+Accounts.swift` guards with `pjsua_acc_get_count() < UInt32(PJSUA_MAX_ACC)`, so the value
-Swift compiled is 4. What is verified:
+### The cause
 
-| | |
-|---|---|
-| Shipped headers | `config_site.h:55-56` says **8**, in both slices |
-| Textual preprocessing | **8** — via `<pjsua-lib/pjsua.h>` *and* via the umbrella with `PJ_AUTOCONF=1` |
-| Compiled Swift constant | **4** |
-| Reproduces on a clean build | **yes** — fresh derived data *and* `ModuleCache.noindex` deleted; `PJSUA+Accounts.swift` demonstrably recompiled |
-| Artifact resolved | the 0.2.0 release zip, `PJSIP.xcframework-2.17.0-288de6142` |
+Not a stale cache, not the wrong artifact, and **not a second `config_site.h`** — the shipped
+`Headers/` tree contains exactly one, and it says 8. The two code paths simply disagree, and it
+reproduces in two commands with no Xcode and no Swift:
 
-So the discrepancy is between **textual inclusion and the clang module** the Swift importer builds
-from — not a stale cache, not the wrong artifact. The umbrella's own comment ("Do NOT override
-config_site.h") hints the module's macro environment is not simply the textual one.
+```sh
+H=<xcframework>/ios-arm64-simulator/Headers
+printf '#include "PJSIP-umbrella.h"\nMAXACC PJSUA_MAX_ACC\n' > /tmp/probe.c
 
-**Consequence today:** the live suite can register **four** accounts, so `test03` fails against the
-eight-slot secrets file, and slots 5–8 (the extra Linphone legs for conference work, and
-`sip2sip.info`) cannot be used. Not a regression — 2.16.0 also had 4 — but the config change did
-not buy what it was meant to. Belongs to `swift-pjsip`'s round, not the suite's.
+xcrun --sdk iphonesimulator clang -E -I"$H" -x c /tmp/probe.c | grep MAXACC
+# MAXACC 8   <- textual: agrees with libpjproject.a
 
-**Handed off** to `../../TASK-code-pjsua-max-acc-module-mismatch.md`, which carries the ruled-out
-list, the two-command clang reproduction to try, and the deduction that drives it: the value can
-only be 4 if `config_site_sample.h` was reached with `PJ_CONFIG_IPHONE` set **and** our override
-skipped — so the module build read a `config_site.h` that is not ours, which is findable with
-`clang -H`.
+xcrun --sdk iphonesimulator clang -fmodules -fmodules-cache-path=/tmp/mc \
+      -I"$H" -E -x c /tmp/probe.c | grep MAXACC
+# MAXACC 4   <- modular: what `import PJSIP` gets
+```
 
-**Do not fix this by hardcoding 8 in `swift-pjsua`.** `PJSUA_MAX_ACC` sizes a fixed array inside
-the `pjsua_var` singleton (unlike `PJSUA_MAX_CALLS`, which is only a ceiling), so a guard that is
-*too high* would index past the end of that array. Today's direction — Swift low, library high — is
-the safe one; the mirror case is silent memory corruption.
+`module PJSIP { umbrella header "PJSIP-umbrella.h" }` does not only name an umbrella header — it
+also registers that header's **directory**, i.e. the whole `Headers/` tree, as an umbrella
+*directory*. Clang then gives every header underneath it its own inferred submodule with its own
+macro scope, and when two headers define the same macro the importer keeps the **first definer's**
+value and silently drops the later override. No diagnostic — not even under `-Wambiguous-macro`.
+
+`config_site.h` is exactly that shape: it includes `config_site_sample.h` (the `PJ_CONFIG_IPHONE`
+preset, which sets the small values) and then overrides it. The preset is the first definer, so the
+preset wins in the module.
+
+It reduces to twelve lines with no PJSIP involved — a module whose umbrella includes `inner.h`,
+which includes `sample.h` and redefines its macro; the importer gets `sample.h`'s value. Moving
+those two headers *outside* the umbrella directory makes it correct again, which is the whole
+mechanism in one experiment.
+
+Two things this explains that the earlier evidence did not:
+
+- **`PJSIP_MAX_PKT_LEN 16000` survived** while `PJSUA_MAX_ACC 8` did not, even though both live in
+  the same file. `PJSIP_MAX_PKT_LEN` is a plain `#define` with no competing definition anywhere —
+  one definer, nothing to lose to. It is not that the `#undef` broke it; any cross-header
+  redefinition loses, `#undef` or not.
+- **It was never iOS-versus-macOS.** Both shipped iOS slices, device and simulator, are equally
+  affected. There is no macOS slice yet.
+
+Sweeping all **1427** object-like macros in the shipped headers through both paths, exactly three
+diverge — and all three are `config_site.h` overrides of a preset value:
+
+| macro | `libpjproject.a` | what Swift imported |
+|---|---|---|
+| `PJSUA_MAX_ACC` | 8 | 4 |
+| `PJSUA_MAX_CALLS` | 8 | 4 |
+| `PJSUA_MAX_CONF_PORTS` | 254 | 12 |
+
+### Which side was authoritative, and the part that had teeth
+
+The **library** is authoritative: the binary really does have eight account slots. The account
+guard was therefore merely conservative — it refused work the library would have accepted, which is
+the harmless direction, exactly as §7.5 originally argued.
+
+The direction is not luck, though, and it is not stable. The preset always wins over our override,
+so *raising* a value reads back low (safe) while *lowering* one would read back high — the
+corrupting direction, silently, for whichever constant someone edits next.
+
+And the safe direction only held for the guard. `PJSUA_MAX_CONF_PORTS` also sizes two **public
+structs**, and there the same divergence was already the corrupting kind:
+
+| | `libpjproject.a` | what Swift imported |
+|---|---|---|
+| `sizeof(pjsua_conf_port_info)` | 1104 | 136 |
+| `sizeof(pjsua_vid_conf_port_info)` | 2104 | 168 |
+
+A Swift caller allocating one of those and handing it to `pjsua_conf_get_port_info()` gives the
+library a 136-byte buffer to write 1104 bytes into. Latent only because `swift-pjsua` does not call
+those functions yet — `PJSUA+Conference.swift` uses `pjsua_conf_connect` / `_disconnect` and
+`pjsua_call_get_conf_port`, none of which touch the struct. D-CONF would have walked into it.
+
+### The fix
+
+Two lines in the generated module map (`swift-pjsip/scripts/build.sh` step 4):
+
+```
+module PJSIP [system] {
+    umbrella header "PJSIP-umbrella.h"
+    textual header "pj/config_site.h"
+    textual header "pj/config_site_sample.h"
+    export *
+}
+```
+
+`textual header` keeps those two out of the submodule split, so every override lands in the same
+macro scope as the definition it overrides. `scripts/verify-xcframework.sh` now expands every macro
+both ways and asserts they match, so this class of bug fails the artifact rather than the test
+suite.
+
+**Shipped as `swift-pjsip` 0.2.1 (2026-08-22); `0.2.0` was deleted** — release, asset and tag — so
+nothing can resolve the broken layout. It was a headers-only respin: only `module.modulemap` and
+`pj/config_site.h` differ, and the merged archives' 428 members are byte-identical per slice.
+Verified from the published artifact via a fresh `swift package resolve`: `PJSUA_MAX_ACC` and
+`PJSUA_MAX_CALLS` compile as 8, `MemoryLayout<pjsua_conf_port_info>.size` is 1104, and
+`SwiftPJSUA` typechecks with no errors.
+
+0.2.1 also stops restating upstream's defaults. `PJSUA_MAX_ACC` and `PJSUA_MAX_CONF_PORTS` are now
+a bare `#undef` of the `PJ_CONFIG_IPHONE` preset rather than `#undef` + a literal, so a future
+upstream raise is inherited instead of pinned; the values are unchanged today (8 and 254). Only
+`PJSUA_MAX_CALLS 8` and `PJSIP_MAX_PKT_LEN 16000` remain real overrides, because upstream's 4 and
+~4000 are genuinely insufficient.
+
+Nothing in `swift-pjsua` changed: `pjsua_acc_get_count() < UInt32(PJSUA_MAX_ACC)` became correct on
+its own once the constant was right. **Still do not hardcode 8 there** — the guard should read the
+constant the library was built with, and a guard that is *too high* indexes past the end of the
+fixed `pjsua_var.acc[]` array.
+
+`swift-pjsua` tracked `swift-pjsip` by `branch: "main"`, which picked this up on any resolve —
+and is itself being retired for the same reason the bug existed: a branch edge re-resolves an
+**ABI** with no version to name it. `swift-pjsua` PR #10 pins the range `"0.2.1" ..< "0.3.0"`,
+accepting only PATCH releases, which by that repo's bump rule are the ones that cannot move the
+binary. Either way **`test03` can use all eight slots of the secrets file** once the new binary
+resolves.
 
 ## 8. Observed on the wire (per endpoint)
 
