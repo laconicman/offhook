@@ -73,7 +73,21 @@ actor EngineHarness {
                 await self.handle(event)
             }
         }
-        try await engine.start()
+        // A TLS listener alongside the default UDP/TCP pair, so an account can register over
+        // `;transport=tls` (test07 — the first thing ever to put a REGISTER through
+        // `Transport.tls`). Two deliberate choices:
+        //
+        // * **Ephemeral port.** `start()` is fail-fast: a TLS listener that lost a race for
+        //   5061 would take the whole suite down with it, and a client-only TLS transport has
+        //   no need of a fixed listening port.
+        // * **No certificate.** pjsip only calls `pj_ssl_sock_set_certificate()` when one is
+        //   configured, so a certless TLS transport is legal and is exactly the softphone
+        //   case — we authenticate the provider against the Darwin trust store, not the
+        //   reverse. Presenting a *client* certificate is a separate question, blocked on
+        //   swift-pjsua's TD-19.
+        var configuration = PJSUA.Configuration()
+        configuration.transports.append(TransportConfiguration("tls", .tls, port: 0))
+        try await engine.start(configuration)
         try await engine.activateNullAudioDevice()
     }
 

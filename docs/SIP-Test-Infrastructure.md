@@ -34,7 +34,7 @@ own voice**. Flexisip negotiated **iLBC** with our binary (SIP-verified 2026-07-
 |---|---|---|---|---|---|
 | **Linphone** | `sip.linphone.org` | UDP/TCP/TLS | ZRTP/SRTP | ~~`4443` (echo)~~ **404** as of 2026-07-04 — use the two-account loopback (§0) | register, audio, **video**, **server conference** (native acct), **push** (self-host, §3) |
 | **sip2sip.info** | `sip2sip.info` | UDP/TCP/TLS | SRTP | `4444` mic, `3333` A/V, `echo@conference.sip2sip.info` (RTP+MSRP echo), `<room>@conference.sip2sip.info` (ad-hoc SylkServer conference) | register, echo, video, ICE/STUN, presence, **multi-party conference** (signup verified working 2026-08-22 — no captcha, instant; but its backend **rejects `+` plus-aliased e-mails**, which reads as a generic "invalid input data value") |
-| **iptel.org** | `iptel.org` | UDP/TCP | — | `echo@iptel.org`, `music@iptel.org` | register, echo (Kamailio home turf) |
+| **iptel.org** | `iptel.org` | UDP/TCP/**TLS** | — | `echo@iptel.org`, `music@iptel.org` | register, echo (Kamailio home turf) |
 | **antisip** | `sip.antisip.com` | UDP/TCP/TLS | SRTP | ~~`thetestcall@sip.antisip.com`~~ **404 "User Is Offline"** (Kamailio 5.8.8), verified 2026-08-19 — register still works | register, RTP/media edge cases |
 | **OnSIP** | `sip.onsip.com` | UDP/TCP/TLS | SRTP | `echo` test app on the account | register, audio/video, IM — free plan still advertised, signup flow **re-check** |
 
@@ -60,7 +60,7 @@ own voice**. Flexisip negotiated **iLBC** with our binary (SIP-verified 2026-07-
 | **Server-focus conference** (RFC 4579) | `isConferenceFocus`, single leg | `<room>@conference.sip2sip.info` (SylkServer ad-hoc mix; verify it sets `isfocus` — re-check), Linphone conference (native acct), or self-hosted Asterisk ConfBridge |
 | **Hybrid VoIP push** (RFC 8599) | `PushConfiguration.apns`, `reRegister` | **self-hosted** Flexisip/OpenSIPS (§3) — public servers won't push your bundle |
 | STUN / ICE | (engine surface TODO — TD-14) | set a STUN server (§4), call across NAT |
-| TLS / SRTP | `Transport.tls` | Linphone / sip2sip / VoIP.ms over TLS |
+| TLS / SRTP | `Transport.tls` | Linphone / sip2sip / VoIP.ms over TLS — and **iptel.org**, which this table used to list as UDP/TCP only; `test07_registersOverTLS` registers there over `;transport=tls` |
 
 ## 3. Push (RFC 8599) — servers, what to supply, self-hosting
 
@@ -256,8 +256,20 @@ fully control for the M3 feature demos.
   Fall back to A/AAAA (roadmap M2 / TD-14). VoIP.ms is a good SRV test.
 - **NAT / symmetric RTP** — without STUN/ICE you may register fine but get one-way/no audio
   behind NAT. Echo endpoints on public servers usually have symmetric-RTP handling.
-- **TLS** — `Transport.tls` validates against the Darwin trust store; provider cert must chain
-  to a system root.
+- **TLS** — **verified live 2026-09-01** (`test07_registersOverTLS`): `sip:offhook2@iptel.org`
+  registered over `sip:iptel.org;transport=tls`, digest-authenticated, 200 with a 60 s expiry —
+  `tlsc… TLS transport 198.18.0.1:63578 is connecting to iptel.org:5061`. Xcode 26.6, iPhone 17
+  Pro simulator, iOS 26.5, PJSIP 2.17.0 (`288de6142`). Three things this settles:
+  - **The client needs no certificate.** pjsip calls `pj_ssl_sock_set_certificate()` only when
+    one is configured, so a certless TLS transport is legal and is the ordinary softphone case.
+    The provider's certificate is validated against the Darwin trust store, so its chain must
+    reach a system root.
+  - **The listening port is irrelevant for a client.** The harness creates the TLS transport on
+    port 0 rather than 5061: `PJSUA.start()` is fail-fast, and one lost race for 5061 would take
+    the whole suite with it.
+  - **Mutual TLS is still blocked**, on `swift-pjsua` TD-19 — a listener restart drops the
+    credentials, and restart is the only recovery path there is. Presenting a *client*
+    certificate is not safe until that is resolved.
 - **Codec** — only G.711/G.722/iLBC/G.729 today (no Opus); fine for all these endpoints.
 - **Push needs your APNs credential on the server** (§3.2) — the single biggest "why doesn't
   it ring in the background" trap.

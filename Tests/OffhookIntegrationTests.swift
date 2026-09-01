@@ -269,6 +269,60 @@ final class OffhookIntegrationTests: XCTestCase {
               + "rx \(record.statistics.receive.packets) pkt")
     }
 
+    // MARK: 08 — TLS registration
+
+    /// Registers over **TLS** against a real provider. `Transport.tls` and
+    /// `TransportConfiguration`'s 5061 default have existed and compiled since TD-18, but
+    /// nothing had ever put a REGISTER through them — the whole TLS surface was unexercised
+    /// against a live server.
+    ///
+    /// Runs last and **retires an account first**: `test03` fills the account table
+    /// (`PJSUA_MAX_ACC`), so this needs a free slot. It re-registers that same account's AOR,
+    /// changing only the transport — which is what makes any difference in the result
+    /// attributable to TLS and not to the account.
+    ///
+    /// No client certificate is involved: pjsip calls `pj_ssl_sock_set_certificate()` only
+    /// when one is configured, and the provider's certificate is validated against the Darwin
+    /// trust store (`swift-pjsip/docs/Apple-TLS-Backends.md`). Mutual TLS is a separate
+    /// question and is blocked on swift-pjsua's TD-19 — a listener restart drops the
+    /// credentials, and restart is the only recovery path there is.
+    func test08_registersOverTLS() async throws {
+        // Never the loopback pair: 04–06 are finished with it, but retiring ACC1/ACC2 would
+        // make a `-only-testing:` re-run of this method behave unlike a full-suite run.
+        guard let (slot, id) = Self.accounts.filter({ $0.key >= 3 })
+                .max(by: { $0.key < $1.key }),
+              let account = TestAccounts.all[slot] else {
+            throw XCTSkip("needs a registered account on a slot >= 3 to retire and re-register over TLS")
+        }
+        try await harness.removeAccount(id)
+        Self.accounts[slot] = nil
+
+        let registrar = "sip:\(account.domain);transport=tls"
+        let tls = try await harness.engine.addAccount(
+            AccountConfiguration(id: account.aor,
+                                 registrar: registrar,
+                                 username: account.username,
+                                 isDefault: false),
+            credentials: InlineCredentialStore(password: account.password))
+
+        let reg: EngineHarness.Registration
+        do {
+            reg = try await harness.waitForRegistrationResult(tls)
+        } catch is EngineHarness.Timeout {
+            try? await harness.removeAccount(tls)
+            throw XCTSkip("\(registrar) gave no registration result — provider weather, re-run later")
+        }
+        // Give the binding back before asserting, so a failure here does not leave the AOR
+        // registered over a transport the rest of the suite does not use.
+        try? await harness.removeAccount(tls)
+
+        try XCTSkipIf(reg.statusCode == 408, "\(registrar) timed out (408) — provider weather")
+        XCTAssertTrue(reg.active, "TLS registration to \(registrar) failed (\(reg.statusCode))")
+        XCTAssertEqual(reg.statusCode, 200, registrar)
+        XCTAssertGreaterThan(reg.expiration, 0, "TLS registration expiration not settled")
+        print("[tls] \(account.aor) registered over TLS via \(registrar), expires in \(reg.expiration)s")
+    }
+
     // MARK: helpers
 
     /// The registered same-domain pair: ACC1's AccountID (caller) + ACC2's dial URI (callee,
