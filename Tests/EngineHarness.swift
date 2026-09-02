@@ -25,6 +25,11 @@ actor EngineHarness {
 
     private(set) var registrations: [AccountID: Registration] = [:]
     private(set) var callStates: [CallID: CallState] = [:]
+    /// SIP status that accompanied each call's last state change — 200 on a normal answer, and
+    /// the rejection code when a leg is turned away. Kept beside `callStates` rather than folded
+    /// into it so the existing readers are untouched; test05 is what needs it, to tell a busy
+    /// registrar defending itself from a bug of ours.
+    private(set) var callStatuses: [CallID: Int32] = [:]
     private(set) var media: [CallID: [CallMediaInfo]] = [:]
     private(set) var answeredIncoming: [CallID] = []
 
@@ -104,8 +109,9 @@ actor EngineHarness {
             answeredIncoming.append(call)
             try? await engine.answer(call) // auto-answer: the callee leg of loopback tests
 
-        case let .callState(call, state, _, _):
+        case let .callState(call, state, _, lastStatus):
             callStates[call] = state
+            callStatuses[call] = lastStatus
 
         case let .callMediaState(call, streams):
             media[call] = streams
@@ -200,6 +206,23 @@ actor EngineHarness {
                           timeout: TimeInterval = 30) async throws {
         _ = try await poll(timeout: timeout, what: "\(call) to reach \(target)") {
             callStates[call] == target ? true : nil
+        }
+    }
+
+    /// Wait until `call` has *settled* — confirmed or disconnected — and report which, with the
+    /// SIP status that got it there.
+    ///
+    /// `waitForCallState(_:.confirmed)` cannot express this: a leg the far end rejects never
+    /// reaches `.confirmed`, so it burns the entire timeout before failing, and the SIP status
+    /// that would have explained why is thrown away. This resolves the moment either terminal
+    /// state arrives.
+    func waitForCallOutcome(_ call: CallID, timeout: TimeInterval = 30)
+        async throws -> (state: CallState, status: Int32)
+    {
+        try await poll(timeout: timeout, what: "\(call) to confirm or disconnect") {
+            guard let state = callStates[call], state == .confirmed || state == .disconnected
+            else { return nil }
+            return (state, callStatuses[call] ?? 0)
         }
     }
 

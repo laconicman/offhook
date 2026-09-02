@@ -166,37 +166,126 @@ final class OffhookIntegrationTests: XCTestCase {
         try await harness.waitForCallState(call, .disconnected)
     }
 
-    // MARK: 05 — simultaneous calls
+    // MARK: 05 — simultaneous calls, to the ceiling
 
-    /// Two loopback calls concurrently confirmed — with their two auto-answered incoming legs
-    /// that's four live calls — then independent teardown. Self-contained: no external echo
-    /// service to depend on (Linphone's historic `4443` echo answers 404 as of 2026-07-04).
+    /// Four loopback calls concurrently confirmed — with their four auto-answered incoming legs
+    /// that is **eight live calls, exactly `PJSUA_MAX_CALLS`** — then a ninth that must be
+    /// refused, then independent teardown. Self-contained: no external echo service to depend on
+    /// (Linphone's historic `4443` echo answers 404 as of 2026-07-04).
     ///
-    /// Four **used** to be exactly `PJSUA_MAX_CALLS`, so this doubled as a saturation test.
-    /// It no longer does: the ceiling is 8 since swift-pjsip 0.2.1 (see
-    /// `PR-swift-pjsip-module-abi.md`). Saturating it again would need eight legs — worth
-    /// deciding deliberately rather than drifting into, since it is four more live calls
-    /// through a public registrar every run.
+    /// Saturation used to come free at two calls, when the ceiling was 4. swift-pjsip 0.2.1's
+    /// module-map fix moved it to 8 (`PR-swift-pjsip-module-abi.md`) and quietly retired the
+    /// property; four outbound legs restores it.
+    ///
+    /// **The ninth call costs the provider nothing.** `pjsua_call_make_call()` allocates a call
+    /// slot before it builds an INVITE, so a full table is refused locally with `PJ_ETOOMANY` and
+    /// nothing reaches the wire. That is what makes asserting the ceiling cheap enough to do on
+    /// every run.
+    ///
+    /// **Rejections are classified, not merely counted.** Eight legs in a burst through a public
+    /// registrar is enough to trip flood protection, and a 403 four INVITEs in is Flexisip
+    /// defending itself rather than a bug of ours. ``providerRejection(_:)`` is the list of
+    /// answers a busy server is entitled to give; anything else disconnecting a leg fails the
+    /// test with the status it died on.
+    ///
+    /// Expect `RTP socket bind() at 0.0.0.0:400x error: Address already in use` in the log at
+    /// this load — eight legs take RTP 4000–4014, the first attempt on a port collides with a
+    /// socket an earlier call has not released, and pjsua walks the range. Observed 2026-09-03:
+    /// all eight sockets came up, no call lost media. Noise, not a symptom.
     func test05_simultaneousCalls() async throws {
         let (caller, calleeAOR) = try Self.loopbackPair()
-        let callA = try await harness.engine.makeCall(to: calleeAOR, from: caller)
-        try await harness.waitForCallState(callA, .confirmed)
+        let outboundLegs = 4 // × 2 legs each (we auto-answer the inbound side) = PJSUA_MAX_CALLS
 
-        let callB = try await harness.engine.makeCall(to: calleeAOR, from: caller)
-        try await harness.waitForCallState(callB, .confirmed)
+        var calls: [CallID] = []
+        func hangUpEverything() async {
+            for call in calls { try? await harness.engine.hangup(call) }
+        }
 
+        for leg in 1...outboundLegs {
+            let call: CallID
+            do {
+                call = try await harness.engine.makeCall(to: calleeAOR, from: caller)
+            } catch {
+                await hangUpEverything()
+                XCTFail("leg \(leg) of \(outboundLegs) could not be placed, below the ceiling: \(error)")
+                return
+            }
+            calls.append(call)
+
+            let outcome: (state: CallState, status: Int32)
+            do {
+                outcome = try await harness.waitForCallOutcome(call)
+            } catch is EngineHarness.Timeout {
+                await hangUpEverything()
+                throw XCTSkip("leg \(leg) of \(outboundLegs) never settled — no answer at all, "
+                              + "which is weather rather than a rejection")
+            }
+
+            guard outcome.state == .confirmed else {
+                await hangUpEverything()
+                if let rejection = Self.providerRejection(outcome.status) {
+                    throw XCTSkip("leg \(leg) of \(outboundLegs) rejected — \(rejection)")
+                }
+                XCTFail("leg \(leg) of \(outboundLegs) disconnected with SIP \(outcome.status), "
+                        + "which is not an answer a registrar is entitled to give here")
+                return
+            }
+        }
+
+        // Everything placed is still up: a later leg must not have torn down an earlier one.
         try await Task.sleep(for: .seconds(2))
-        let stateA = await harness.state(of: callA)
-        let stateB = await harness.state(of: callB)
-        XCTAssertEqual(stateA, .confirmed, "call A dropped while B was live")
-        XCTAssertEqual(stateB, .confirmed)
+        for (index, call) in calls.enumerated() {
+            let state = await harness.state(of: call)
+            XCTAssertEqual(state, .confirmed, "leg \(index + 1) dropped while the others were live")
+        }
 
-        try await harness.engine.hangup(callA)
-        try await harness.waitForCallState(callA, .disconnected)
-        let stateBAfterA = await harness.state(of: callB)
-        XCTAssertEqual(stateBAfterA, .confirmed, "hanging up A must not affect B")
-        try await harness.engine.hangup(callB)
-        try await harness.waitForCallState(callB, .disconnected)
+        // The table is now full. Local refusal, no INVITE.
+        do {
+            let ninth = try await harness.engine.makeCall(to: calleeAOR, from: caller)
+            calls.append(ninth)
+            XCTFail("a ninth call was accepted — either PJSUA_MAX_CALLS is not 8, or not all "
+                    + "eight legs were actually live")
+        } catch let error as PJSUAError {
+            XCTAssertEqual(error.status, Self.pjTooMany,
+                           "at the ceiling expected PJ_ETOOMANY (\(Self.pjTooMany)); got \(error)")
+        }
+
+        // Independent teardown: hanging up one leg must not disturb the rest.
+        for (index, call) in calls.enumerated() {
+            try await harness.engine.hangup(call)
+            try await harness.waitForCallState(call, .disconnected)
+            for survivor in calls.dropFirst(index + 1) {
+                let state = await harness.state(of: survivor)
+                XCTAssertEqual(state, .confirmed,
+                               "hanging up leg \(index + 1) disturbed a later leg")
+            }
+        }
+    }
+
+    /// `PJ_ETOOMANY` — `PJ_ERRNO_START_STATUS + 10`, `pjlib/include/pj/errno.h`. Spelled as a
+    /// literal on purpose: this target links `SwiftPJSUA` only, and pulling in `PJSIP` for one
+    /// constant would widen the test bundle's dependency surface to save nothing.
+    private static let pjTooMany: Int32 = 70_010
+
+    /// Answers a busy public registrar — or a saturated far leg — is entitled to give, and what
+    /// each one means here. A leg that ends on one of these is weather; anything else is ours.
+    ///
+    /// Deliberately narrow, and **408 is deliberately absent**: a call that draws no response at
+    /// all is a different event from a server that answered "no", and folding the two together is
+    /// exactly how a real signalling regression gets skipped as weather for months. No-answer is
+    /// handled above, by the `Timeout` branch, and says so in its own words.
+    private static func providerRejection(_ status: Int32) -> String? {
+        switch status {
+        case 403: return "403 Forbidden, i.e. flood or brute-force protection; Flexisip keeps "
+                       + "this up for minutes after a burst"
+        case 429: return "429, rate limited"
+        case 480: return "480 Temporarily Unavailable — the far leg is not taking calls"
+        case 486: return "486 Busy Here — the callee would not take another leg"
+        case 500: return "500 Server Internal Error"
+        case 503: return "503 Service Unavailable — overload, usually with a Retry-After"
+        case 603: return "603 Decline"
+        default:  return nil
+        }
     }
 
     // MARK: 06 — video call + statistics
