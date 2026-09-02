@@ -62,9 +62,12 @@ final class OffhookIntegrationTests: XCTestCase {
             try? await harness.removeAccount(bad)
             throw XCTSkip("\(account.domain) didn't answer the probe REGISTER — provider weather, re-run later")
         }
-        // Free the slot promptly: the binary's account table holds PJSUA_MAX_ACC == 4 total
-        // and test03 needs all four. Also exercises removeAccount(). Via the harness so the
-        // snapshot dies with the account (pjsua recycles ids).
+        // Free the slot promptly: the binary's account table holds PJSUA_MAX_ACC == 8 total
+        // and test03 uses every slot the secrets file configures, which is also eight. Still
+        // load-bearing, then — just at a different number than it used to be (the preset said
+        // 4 until swift-pjsip 0.2.1 fixed the module map; see PR-swift-pjsip-module-abi.md).
+        // Also exercises removeAccount(). Via the harness so the snapshot dies with the
+        // account (pjsua recycles ids).
         try await harness.removeAccount(bad)
 
         // 408 = no answer from the server, which proves nothing about auth — that's weather too.
@@ -166,9 +169,14 @@ final class OffhookIntegrationTests: XCTestCase {
     // MARK: 05 — simultaneous calls
 
     /// Two loopback calls concurrently confirmed — with their two auto-answered incoming legs
-    /// that's four live calls, exactly the binary's PJSUA_MAX_CALLS — then independent
-    /// teardown. Self-contained: no external echo service to depend on (Linphone's historic
-    /// `4443` echo answers 404 as of 2026-07-04).
+    /// that's four live calls — then independent teardown. Self-contained: no external echo
+    /// service to depend on (Linphone's historic `4443` echo answers 404 as of 2026-07-04).
+    ///
+    /// Four **used** to be exactly `PJSUA_MAX_CALLS`, so this doubled as a saturation test.
+    /// It no longer does: the ceiling is 8 since swift-pjsip 0.2.1 (see
+    /// `PR-swift-pjsip-module-abi.md`). Saturating it again would need eight legs — worth
+    /// deciding deliberately rather than drifting into, since it is four more live calls
+    /// through a public registrar every run.
     func test05_simultaneousCalls() async throws {
         let (caller, calleeAOR) = try Self.loopbackPair()
         let callA = try await harness.engine.makeCall(to: calleeAOR, from: caller)
