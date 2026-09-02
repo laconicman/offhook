@@ -6,6 +6,10 @@ June–July 2026 (web-level: docs/status pages; SIP-level liveness re-confirmed 
 marked); public services come and go, so treat liveness as "confirmed recently, re-check if it
 fails." No secrets here — register your own accounts; credentials are yours.
 
+> **This file is *what* to test against. *How* to run it — which suites exist, why XCTest is
+> Simulator-only, how to drive a real device, and the caveats that are not bugs — is
+> [`Testing-Playbook.md`](./Testing-Playbook.md).**
+
 ## 0. Fastest path to first audio (Phase 0 smoke)
 
 Register one free account, then type its values into Offhook's three fields + a dial target:
