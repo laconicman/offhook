@@ -41,6 +41,32 @@ See the smoke procedure in [README](../README.md) and endpoints in
 - **Credential persistence** — Keychain-backed accounts ([OH-6](./Tech-Debt.md); `../../Phone` has a
   reference Keychain implementation).
 
+## Gated — DTLS-SRTP (decision, not a task)
+
+Not scheduled. Recorded so the decision is made deliberately rather than by whoever first needs it.
+
+Media encryption today is **SDES-SRTP**, which works and ships. **DTLS-SRTP is off**
+(`PJMEDIA_SRTP_HAS_DTLS = 0`, upstream's own default) and enabling it requires vendoring **OpenSSL**
+into `swift-pjsip` — `transport_srtp_dtls.c` includes the OpenSSL headers unconditionally, and no
+choice of SIP-TLS backend changes that. Full reasoning:
+[`swift-pjsip/docs/Build-Time-Feature-Gates.md`](../../swift-pjsip/docs/Build-Time-Feature-Gates.md).
+
+**Trigger — do it when one of these is true, not before:**
+
+- a provider we intend to support offers DTLS-SRTP only, or refuses SDES;
+- we need WebRTC interop;
+- or a deployment requires that media keys never traverse signalling, which SDES cannot satisfy
+  (see [OH-10](./Tech-Debt.md)).
+
+**What it costs when we pull the trigger:** an OpenSSL dependency in a shipped binary, with its
+patch cadence, plus the size. That is an ongoing obligation, not a one-off build change, which is
+why this is written as a gate rather than a backlog item.
+
+Note that if we ever do link OpenSSL, the question "why carry two TLS stacks" reopens — the answer
+is likely still Apple's Network framework for SIP-TLS (platform-native, no certificate-store
+plumbing) with OpenSSL confined to media keying, but it should be re-argued at that point rather
+than inherited.
+
 ## Later — product surface (from prior art)
 
 Small, independent items lifted from the [Prior-Art](./Prior-Art.md) survey. Each is cheap on its
