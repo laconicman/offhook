@@ -80,7 +80,7 @@ The app itself links because SwiftUI drags UIKit/Metal in anyway. The support-ta
 them. **Two prerequisites before adopting hosting**, neither done:
 
 1. add `OpenGLES`, `UIKit` and `Metal` to `SwiftPJSUA`'s `linkerSettings`, or stop compiling
-   the OpenGL video device into the binary;
+   the OpenGL video device into the binary — `swift-pjsua` **TD-28**;
 2. settle that **pjsua is process-global** — one engine per process, no restart. An app-hosted
    bundle runs inside the app, whose `PhoneModel` constructs its own `PJSUA` and installs the
    global event sink. The harness constructs a second one. Last writer wins on the sink, which
