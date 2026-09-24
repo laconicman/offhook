@@ -63,6 +63,10 @@ final class PhoneModel: NSObject {
     private var account: AccountID?
     private static let maxLogLines = 200
 
+    /// Overrides the UDP/TCP listening port when `OFFHOOK_PORT` is set; `nil` keeps the IANA
+    /// defaults. Debug-tool hook only — see `init()`.
+    private var transportPort: UInt32?
+
     override init() {
         callKit = CallKitController(engine: engine)
         super.init()
@@ -74,6 +78,10 @@ final class PhoneModel: NSObject {
         if let value = env["OFFHOOK_REGISTRAR"] { registrar = value }
         if let value = env["OFFHOOK_USERNAME"] { username = value }
         if let value = env["OFFHOOK_PASSWORD"] { password = value }
+        // `0` binds ephemeral ports instead of 5060/5061. Needed on a real device, where
+        // another VoIP app may already hold 5060 and `PJSUA.start()` is fail-fast (TD-18),
+        // so one squatted port takes the whole engine down before it ever registers.
+        if let value = env["OFFHOOK_PORT"], let port = UInt32(value) { transportPort = port }
         if let value = env["OFFHOOK_DIAL"] { dialTarget = value }
     }
 
@@ -107,7 +115,18 @@ final class PhoneModel: NSObject {
         guard engineState == .idle else { return }
         engineState = .starting
         do {
-            try await engine.start()
+            // UDP + TCP (the engine defaults) plus TLS on an ephemeral port. A client-only TLS
+            // transport needs no fixed listening port and no certificate — pjsip sets one only
+            // when configured — so this costs nothing when unused and is what lets a registrar
+            // URI carry `;transport=tls`. Port 0 rather than 5061 because `start()` is
+            // fail-fast: losing a race for the IANA port would take the whole engine down.
+            var configuration = PJSUA.Configuration()
+            if let transportPort {
+                configuration.transports = [TransportConfiguration("udp", .udp, port: transportPort),
+                                            TransportConfiguration("tcp", .tcp, port: transportPort)]
+            }
+            configuration.transports.append(TransportConfiguration("tls", .tls, port: 0))
+            try await engine.start(configuration)
             // Registration relay: the router owns the event stream; the app observes through it.
             // The observer is @MainActor, so this closure runs on the main actor — update directly.
             await callKit.router.setRegistrationObserver { [weak self] _, active, code, expiration in

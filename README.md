@@ -65,7 +65,7 @@ A live-infrastructure XCTest suite drives the engine against real SIP servers â€
 Phase 0 smoke, automated: headless engine start (null sound device â€” no mic permission),
 negative auth (4xx/6xx), all-accounts registration (200 + expiration), an audio loopback call
 with RTP/RTCP statistics + codec assertions, simultaneous calls (up to the binary's
-`PJSUA_MAX_CALLS` = 4), and a video loopback (H264 negotiates on the Simulator; RTP flow needs
+`PJSUA_MAX_CALLS` = 8), and a video loopback (H264 negotiates on the Simulator; RTP flow needs
 a camera, so that step skips off-device).
 
 ```sh

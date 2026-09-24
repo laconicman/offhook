@@ -192,3 +192,26 @@ The user sees a running call timer, a "connected" label, and silence.
 
 - [Design](./Design.md) · [Roadmap](./Roadmap.md) · [Prior-Art](./Prior-Art.md)
 - `../../swift-pjsua/docs/Tech-Debt.md` (TD-1, TD-14 referenced above)
+
+### OH-10 — media encryption is only as strong as the signalling hop · open (constraint, not a bug)
+
+We ship SRTP with **SDES** keying and no DTLS-SRTP (`PJMEDIA_SRTP_HAS_DTLS = 0`, upstream's
+default; see [`swift-pjsip/docs/Build-Time-Feature-Gates.md`](../../swift-pjsip/docs/Build-Time-Feature-Gates.md)).
+SDES puts the media key **in the SDP**, so it is protected only by whatever protects the
+signalling.
+
+- **Cost.** Any hop that can read our signalling can read our media keys. That means every SIP
+  proxy, SBC and registrar on the path, not just the far endpoint — and it means media
+  confidentiality collapses to *"was every signalling hop TLS, all the way"*, which is a property
+  we cannot verify from the client. Over UDP or TCP signalling, SRTP with SDES is close to
+  decorative against a network attacker.
+- This is **not** end-to-end encryption and should never be described as such in UI or docs. If a
+  padlock is ever shown, it can honestly mean "encrypted to the server", nothing more.
+- **Not a defect.** It is the upstream default and the correct trade for a client that does not
+  vendor OpenSSL. Recorded because the constraint is invisible from our own API surface: nothing in
+  `swift-pjsua` reports which keying method was used, so "SRTP is on" reads as stronger than it is.
+- **Discharge.** Either enable DTLS-SRTP — which is a gated decision with real cost, see
+  [Roadmap](./Roadmap.md) — or, much cheaper and worth doing first, surface the keying method and
+  the signalling transport together so the actual guarantee is visible rather than assumed.
+- Relates: [Roadmap](./Roadmap.md) "Gated — DTLS-SRTP"; `swift-pjsua` TD-22 (TLS listener
+  credentials), since both are about believing a security property we have not verified.

@@ -62,9 +62,12 @@ final class OffhookIntegrationTests: XCTestCase {
             try? await harness.removeAccount(bad)
             throw XCTSkip("\(account.domain) didn't answer the probe REGISTER — provider weather, re-run later")
         }
-        // Free the slot promptly: the binary's account table holds PJSUA_MAX_ACC == 4 total
-        // and test03 needs all four. Also exercises removeAccount(). Via the harness so the
-        // snapshot dies with the account (pjsua recycles ids).
+        // Free the slot promptly: the binary's account table holds PJSUA_MAX_ACC == 8 total
+        // and test03 uses every slot the secrets file configures, which is also eight. Still
+        // load-bearing, then — just at a different number than it used to be (the preset said
+        // 4 until swift-pjsip 0.2.1 fixed the module map; see PR-swift-pjsip-module-abi.md).
+        // Also exercises removeAccount(). Via the harness so the snapshot dies with the
+        // account (pjsua recycles ids).
         try await harness.removeAccount(bad)
 
         // 408 = no answer from the server, which proves nothing about auth — that's weather too.
@@ -163,32 +166,129 @@ final class OffhookIntegrationTests: XCTestCase {
         try await harness.waitForCallState(call, .disconnected)
     }
 
-    // MARK: 05 — simultaneous calls
+    // MARK: 05 — simultaneous calls, to the ceiling
 
-    /// Two loopback calls concurrently confirmed — with their two auto-answered incoming legs
-    /// that's four live calls, exactly the binary's PJSUA_MAX_CALLS — then independent
-    /// teardown. Self-contained: no external echo service to depend on (Linphone's historic
-    /// `4443` echo answers 404 as of 2026-07-04).
+    /// Four loopback calls concurrently confirmed — with their four auto-answered incoming legs
+    /// that is **eight live calls, exactly `PJSUA_MAX_CALLS`** — then a ninth that must be
+    /// refused, then independent teardown. Self-contained: no external echo service to depend on
+    /// (Linphone's historic `4443` echo answers 404 as of 2026-07-04).
+    ///
+    /// Saturation used to come free at two calls, when the ceiling was 4. swift-pjsip 0.2.1's
+    /// module-map fix moved it to 8 (`PR-swift-pjsip-module-abi.md`) and quietly retired the
+    /// property; four outbound legs restores it.
+    ///
+    /// **The ninth call costs the provider nothing.** `pjsua_call_make_call()` allocates a call
+    /// slot before it builds an INVITE, so a full table is refused locally with `PJ_ETOOMANY` and
+    /// nothing reaches the wire. That is what makes asserting the ceiling cheap enough to do on
+    /// every run.
+    ///
+    /// **Rejections are classified, not merely counted.** Eight legs in a burst through a public
+    /// registrar is enough to trip flood protection, and a 403 four INVITEs in is Flexisip
+    /// defending itself rather than a bug of ours. ``providerRejection(_:)`` is the list of
+    /// answers a busy server is entitled to give; anything else disconnecting a leg fails the
+    /// test with the status it died on.
+    ///
+    /// Expect `RTP socket bind() at 0.0.0.0:400x error: Address already in use` in the log at
+    /// this load — eight legs take RTP 4000–4014, the first attempt on a port collides with a
+    /// socket an earlier call has not released, and pjsua walks the range. Observed 2026-09-03:
+    /// all eight sockets came up, no call lost media. Noise, not a symptom.
     func test05_simultaneousCalls() async throws {
         let (caller, calleeAOR) = try Self.loopbackPair()
-        let callA = try await harness.engine.makeCall(to: calleeAOR, from: caller)
-        try await harness.waitForCallState(callA, .confirmed)
+        let outboundLegs = 4 // × 2 legs each (we auto-answer the inbound side) = PJSUA_MAX_CALLS
 
-        let callB = try await harness.engine.makeCall(to: calleeAOR, from: caller)
-        try await harness.waitForCallState(callB, .confirmed)
+        var calls: [CallID] = []
+        func hangUpEverything() async {
+            for call in calls { try? await harness.engine.hangup(call) }
+        }
 
+        for leg in 1...outboundLegs {
+            let call: CallID
+            do {
+                call = try await harness.engine.makeCall(to: calleeAOR, from: caller)
+            } catch {
+                await hangUpEverything()
+                XCTFail("leg \(leg) of \(outboundLegs) could not be placed, below the ceiling: \(error)")
+                return
+            }
+            calls.append(call)
+
+            let outcome: (state: CallState, status: Int32)
+            do {
+                outcome = try await harness.waitForCallOutcome(call)
+            } catch is EngineHarness.Timeout {
+                await hangUpEverything()
+                throw XCTSkip("leg \(leg) of \(outboundLegs) never settled — no answer at all, "
+                              + "which is weather rather than a rejection")
+            }
+
+            guard outcome.state == .confirmed else {
+                await hangUpEverything()
+                if let rejection = Self.providerRejection(outcome.status) {
+                    throw XCTSkip("leg \(leg) of \(outboundLegs) rejected — \(rejection)")
+                }
+                XCTFail("leg \(leg) of \(outboundLegs) disconnected with SIP \(outcome.status), "
+                        + "which is not an answer a registrar is entitled to give here")
+                return
+            }
+        }
+
+        // Everything placed is still up: a later leg must not have torn down an earlier one.
         try await Task.sleep(for: .seconds(2))
-        let stateA = await harness.state(of: callA)
-        let stateB = await harness.state(of: callB)
-        XCTAssertEqual(stateA, .confirmed, "call A dropped while B was live")
-        XCTAssertEqual(stateB, .confirmed)
+        for (index, call) in calls.enumerated() {
+            let state = await harness.state(of: call)
+            XCTAssertEqual(state, .confirmed, "leg \(index + 1) dropped while the others were live")
+        }
 
-        try await harness.engine.hangup(callA)
-        try await harness.waitForCallState(callA, .disconnected)
-        let stateBAfterA = await harness.state(of: callB)
-        XCTAssertEqual(stateBAfterA, .confirmed, "hanging up A must not affect B")
-        try await harness.engine.hangup(callB)
-        try await harness.waitForCallState(callB, .disconnected)
+        // The table is now full. Local refusal, no INVITE.
+        do {
+            let ninth = try await harness.engine.makeCall(to: calleeAOR, from: caller)
+            calls.append(ninth)
+            XCTFail("a ninth call was accepted — either PJSUA_MAX_CALLS is not 8, or not all "
+                    + "eight legs were actually live")
+        } catch let error as PJSUAError {
+            XCTAssertEqual(error.status, Self.pjTooMany,
+                           "at the ceiling expected PJ_ETOOMANY (\(Self.pjTooMany)); got \(error)")
+        }
+
+        // Independent teardown: hanging up one leg must not disturb the rest.
+        for (index, call) in calls.enumerated() {
+            try await harness.engine.hangup(call)
+            try await harness.waitForCallState(call, .disconnected)
+            for survivor in calls.dropFirst(index + 1) {
+                let state = await harness.state(of: survivor)
+                XCTAssertEqual(state, .confirmed,
+                               "hanging up leg \(index + 1) disturbed a later leg")
+            }
+        }
+    }
+
+    /// `PJ_ETOOMANY` — `PJ_ERRNO_START_STATUS + 10`, `pjlib/include/pj/errno.h`. Spelled as a
+    /// literal on purpose: this target links `SwiftPJSUA` only, and pulling in `PJSIP` for one
+    /// constant would widen the test bundle's dependency surface to save nothing.
+    private static let pjTooMany: Int32 = 70_010
+
+    /// Answers a busy public registrar — or a saturated far leg — is entitled to give, and what
+    /// each one means here. A leg that ends on one of these is weather; anything else is ours.
+    ///
+    /// Deliberately narrow, and 408 wears it on the label: a terminal 408 means nothing answered
+    /// conclusively — either our INVITE's Timer B expired or a proxy reported its own upstream
+    /// timeout — which is the same weather class the `Timeout` branch covers for a call that
+    /// produced no terminal event at all. It is *not* folded into the silent-rejection codes
+    /// below; it is named separately so a real 4xx/5xx regression still fails rather than skips.
+    private static func providerRejection(_ status: Int32) -> String? {
+        switch status {
+        case 408: return "408 Request Timeout — nothing answered conclusively (our Timer B or "
+                       + "the provider's upstream); weather, same class as no terminal event"
+        case 403: return "403 Forbidden, i.e. flood or brute-force protection; Flexisip keeps "
+                       + "this up for minutes after a burst"
+        case 429: return "429, rate limited"
+        case 480: return "480 Temporarily Unavailable — the far leg is not taking calls"
+        case 486: return "486 Busy Here — the callee would not take another leg"
+        case 500: return "500 Server Internal Error"
+        case 503: return "503 Service Unavailable — overload, usually with a Retry-After"
+        case 603: return "603 Decline"
+        default:  return nil
+        }
     }
 
     // MARK: 06 — video call + statistics
@@ -267,6 +367,76 @@ final class OffhookIntegrationTests: XCTestCase {
         print("[stats] hangup record: \(record.statistics.codec) "
               + "tx \(record.statistics.transmit.packets) pkt, "
               + "rx \(record.statistics.receive.packets) pkt")
+    }
+
+    // MARK: 08 — TLS registration
+
+    /// Registers over **TLS** against a real provider. `Transport.tls` and
+    /// `TransportConfiguration`'s 5061 default have existed and compiled since TD-18, but
+    /// nothing had ever put a REGISTER through them — the whole TLS surface was unexercised
+    /// against a live server.
+    ///
+    /// Runs last and **retires an account first**: `test03` fills the account table
+    /// (`PJSUA_MAX_ACC`), so this needs a free slot. It re-registers that same account's AOR,
+    /// changing only the transport — which is what makes any difference in the result
+    /// attributable to TLS and not to the account.
+    ///
+    /// No client certificate is involved: pjsip calls `pj_ssl_sock_set_certificate()` only
+    /// when one is configured, and the provider's certificate is validated against the Darwin
+    /// trust store (`swift-pjsip/docs/Apple-TLS-Backends.md`). Mutual TLS is a separate
+    /// question and is blocked on swift-pjsua's TD-19 — a listener restart drops the
+    /// credentials, and restart is the only recovery path there is.
+    func test08_registersOverTLS() async throws {
+        // Never the loopback pair: 04–06 are finished with it, but retiring ACC1/ACC2 would
+        // make a `-only-testing:` re-run of this method behave unlike a full-suite run.
+        let account: TestAccount
+        if let (slot, id) = Self.accounts.filter({ $0.key >= 3 })
+                .max(by: { $0.key < $1.key }),
+           let configured = TestAccounts.all[slot] {
+            // Full suite: the account table can be full, so retire a ≥3 binding first.
+            try await harness.removeAccount(id)
+            Self.accounts[slot] = nil
+            account = configured
+        } else if let (_, configured) = TestAccounts.all.filter({ $0.key >= 3 })
+                .max(by: { $0.key < $1.key }) {
+            // `-only-testing:` re-run: nothing is registered, so add the account over TLS
+            // directly — the isolated path must exercise registration, not skip it.
+            account = configured
+        } else {
+            throw XCTSkip("needs a configured account on a slot >= 3 to register over TLS")
+        }
+
+        // TLS probes the *same* registrar test03 used — an override may name a different
+        // host or carry URI parameters that rebuilding from `domain` would drop.
+        var registrar = account.registrar
+        if let transport = registrar.range(of: ";transport=[^;]*", options: .regularExpression) {
+            registrar.replaceSubrange(transport, with: ";transport=tls")
+        } else {
+            registrar += ";transport=tls"
+        }
+        let tls = try await harness.engine.addAccount(
+            AccountConfiguration(id: account.aor,
+                                 registrar: registrar,
+                                 username: account.username,
+                                 isDefault: false),
+            credentials: InlineCredentialStore(password: account.password))
+
+        let reg: EngineHarness.Registration
+        do {
+            reg = try await harness.waitForRegistrationResult(tls)
+        } catch is EngineHarness.Timeout {
+            try? await harness.removeAccount(tls)
+            throw XCTSkip("\(registrar) gave no registration result — provider weather, re-run later")
+        }
+        // Give the binding back before asserting, so a failure here does not leave the AOR
+        // registered over a transport the rest of the suite does not use.
+        try? await harness.removeAccount(tls)
+
+        try XCTSkipIf(reg.statusCode == 408, "\(registrar) timed out (408) — provider weather")
+        XCTAssertTrue(reg.active, "TLS registration to \(registrar) failed (\(reg.statusCode))")
+        XCTAssertEqual(reg.statusCode, 200, registrar)
+        XCTAssertGreaterThan(reg.expiration, 0, "TLS registration expiration not settled")
+        print("[tls] \(account.aor) registered over TLS via \(registrar), expires in \(reg.expiration)s")
     }
 
     // MARK: helpers
