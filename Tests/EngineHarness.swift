@@ -121,6 +121,17 @@ actor EngineHarness {
         return pair
     }
 
+    /// The account already registered under `slot`, if any — including ones the ordered suite
+    /// created through its own `addAccount` and adopted via ``adoptAccount(_:forSlot:)``.
+    func account(forSlot slot: Int) -> AccountID? { registered[slot] }
+
+    /// Record an account the caller created outside ``registerAccount(slot:)``. The ordered
+    /// suite registers through `engine.addAccount` directly; without this shared table a run
+    /// mixed with it would double-register the slot and burn a second account slot.
+    func adoptAccount(_ id: AccountID, forSlot slot: Int) {
+        registered[slot] = id
+    }
+
     /// Register one configured account by slot. Idempotent per slot, so an observation run can
     /// bring up just the account it needs — which is what lets the same instruments be pointed at
     /// a provider that offers an echo endpoint instead of a same-domain pair.
@@ -153,6 +164,9 @@ actor EngineHarness {
     func removeAccount(_ account: AccountID) async throws {
         try await engine.removeAccount(account)
         registrations[account] = nil
+        if let slot = registered.first(where: { $0.value == account })?.key {
+            registered[slot] = nil
+        }
     }
 
     // MARK: waiting (poll the event-fed snapshots)

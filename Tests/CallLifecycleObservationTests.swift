@@ -14,7 +14,7 @@ import SwiftPJSUA
 /// the host's network for ten minutes:
 ///
 /// ```
-/// OFFHOOK_OBSERVE=1 xcodebuild test -scheme Offhook \
+/// TEST_RUNNER_OFFHOOK_OBSERVE=1 xcodebuild test -scheme Offhook \
 ///   -destination 'platform=iOS Simulator,name=iPhone 16 Pro,OS=18.5' \
 ///   -only-testing:OffhookTests/CallLifecycleObservationTests/test20_sessionTimerAndHoldResumeRecords
 /// ```
@@ -28,7 +28,7 @@ final class CallLifecycleObservationTests: XCTestCase {
 
     override func setUp() async throws {
         try XCTSkipUnless(EngineHarness.tracing,
-                          "observation runs are opt-in — set OFFHOOK_OBSERVE=1")
+                          "observation runs are opt-in — set TEST_RUNNER_OFFHOOK_OBSERVE=1")
         try await harness.startIfNeeded()
     }
 
@@ -235,7 +235,9 @@ final class CallLifecycleObservationTests: XCTestCase {
                     line += " stats=UNAVAILABLE" // the call or its media session is gone
                 }
             }
+            // The harness's list is process-wide; only this run's legs count.
             let events = await harness.mediaEvents
+                .filter { $0.call == caller || $0.call == callee }
             line += " | mediaEvents=\(events.count)"
             mark(line)
             // Surface each new one once, in full — the whole question of §3 is what arrives.

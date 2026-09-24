@@ -89,12 +89,20 @@ final class OffhookIntegrationTests: XCTestCase {
     func test03_allConfiguredAccountsRegister() async throws {
         try XCTSkipIf(TestAccounts.all.isEmpty, "no test accounts configured")
         for (slot, account) in TestAccounts.all.sorted(by: { $0.key < $1.key }) {
-            let id = try await harness.engine.addAccount(
-                AccountConfiguration(id: account.aor,
-                                     registrar: account.registrar,
-                                     username: account.username,
-                                     isDefault: slot == 1),
-                credentials: InlineCredentialStore(password: account.password))
+            // Reuse rather than re-add: in a mixed run the observation suite may already
+            // hold this slot, and pjsua's account table is finite.
+            let id: AccountID
+            if let existing = await harness.account(forSlot: slot) {
+                id = existing
+            } else {
+                id = try await harness.engine.addAccount(
+                    AccountConfiguration(id: account.aor,
+                                         registrar: account.registrar,
+                                         username: account.username,
+                                         isDefault: slot == 1),
+                    credentials: InlineCredentialStore(password: account.password))
+                await harness.adoptAccount(id, forSlot: slot)
+            }
             let reg: EngineHarness.Registration
             do {
                 reg = try await harness.waitForRegistrationResult(id)
