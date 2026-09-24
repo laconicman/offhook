@@ -51,7 +51,11 @@ struct TestAccount {
 ///     OFFHOOK_TEST_ACC1_PASSWORD=…
 ///
 /// Convention: ACC1 + ACC2 are a **same-domain pair** (loopback call tests route ACC1 → ACC2
-/// through their shared registrar); ACC3+ are extra independent domains.
+/// through their shared registrar). Slots 3–8 are extras, mixed on purpose: some add
+/// *independent domains* (cross-domain simultaneous-call / dedup tests), others add more legs
+/// on ACC1's domain (a server-side conference needs every participant on one registrar). Which
+/// is which is recorded next to the credentials, not here — read the slot map in
+/// `secrets/test-accounts.env`. Every slot is optional; `require(_:)` skips when unset.
 enum TestAccounts {
     static let all: [Int: TestAccount] = load()
 
