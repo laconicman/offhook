@@ -270,12 +270,15 @@ final class OffhookIntegrationTests: XCTestCase {
     /// Answers a busy public registrar — or a saturated far leg — is entitled to give, and what
     /// each one means here. A leg that ends on one of these is weather; anything else is ours.
     ///
-    /// Deliberately narrow, and **408 is deliberately absent**: a call that draws no response at
-    /// all is a different event from a server that answered "no", and folding the two together is
-    /// exactly how a real signalling regression gets skipped as weather for months. No-answer is
-    /// handled above, by the `Timeout` branch, and says so in its own words.
+    /// Deliberately narrow, and 408 wears it on the label: a terminal 408 means nothing answered
+    /// conclusively — either our INVITE's Timer B expired or a proxy reported its own upstream
+    /// timeout — which is the same weather class the `Timeout` branch covers for a call that
+    /// produced no terminal event at all. It is *not* folded into the silent-rejection codes
+    /// below; it is named separately so a real 4xx/5xx regression still fails rather than skips.
     private static func providerRejection(_ status: Int32) -> String? {
         switch status {
+        case 408: return "408 Request Timeout — nothing answered conclusively (our Timer B or "
+                       + "the provider's upstream); weather, same class as no terminal event"
         case 403: return "403 Forbidden, i.e. flood or brute-force protection; Flexisip keeps "
                        + "this up for minutes after a burst"
         case 429: return "429, rate limited"
@@ -394,7 +397,14 @@ final class OffhookIntegrationTests: XCTestCase {
         try await harness.removeAccount(id)
         Self.accounts[slot] = nil
 
-        let registrar = "sip:\(account.domain);transport=tls"
+        // TLS probes the *same* registrar test03 used — an override may name a different
+        // host or carry URI parameters that rebuilding from `domain` would drop.
+        var registrar = account.registrar
+        if let transport = registrar.range(of: ";transport=[^;]*", options: .regularExpression) {
+            registrar.replaceSubrange(transport, with: ";transport=tls")
+        } else {
+            registrar += ";transport=tls"
+        }
         let tls = try await harness.engine.addAccount(
             AccountConfiguration(id: account.aor,
                                  registrar: registrar,
