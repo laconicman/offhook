@@ -4,11 +4,16 @@ import XCTest
 
 /// Process-wide harness around the single ``PJSUA`` engine for the integration suite.
 ///
-/// pjsua is process-global (one engine per process, no restart) and `engine.events` is a
-/// single-consumer `AsyncStream`, so the whole suite shares **one** started engine and **one**
-/// event pump — this actor is the sole events consumer (mirroring the app's PhoneModel /
-/// future CallSessionRouter role). Tests read its event-fed snapshots through polling wait
-/// helpers; incoming calls are auto-answered (the callee leg of loopback calls).
+/// pjsua is process-global (one engine per process, no restart) and the engine's streams are
+/// single-consumer `AsyncStream`s, so the whole suite shares **one** started engine and **one**
+/// pump per stream — this actor is the sole consumer of both (mirroring the app's
+/// PhoneModel / future CallSessionRouter role). Tests read its event-fed snapshots through
+/// polling wait helpers; incoming calls are auto-answered (the callee leg of loopback calls).
+///
+/// The split mirrors the engine contract: ``PJSUA/callEvents`` is the authoritative ordered
+/// channel for lifecycle, registration *transitions*, and one-shot media errors;
+/// ``PJSUA/events`` is bounded telemetry whose copies of guaranteed events are ignored here —
+/// the only payload taken from it is `.callMediaEvent(.other)` (periodic, informational).
 ///
 /// Audio runs on the **null sound device** (``PJSUA/activateNullAudioDevice()``): the bridge
 /// gets its clock without `AVAudioSession` or mic permission, so RTP flows headlessly in CI.
@@ -47,6 +52,7 @@ actor EngineHarness {
     private(set) var mediaEvents: [(call: CallID, mediaIndex: Int, event: CallMediaEvent)] = []
 
     private var pump: Task<Void, Never>?
+    private var telemetryPump: Task<Void, Never>?
     private var started = false
     private var loopback: (caller: AccountID, calleeAOR: String)?
     private var registered: [Int: AccountID] = [:]
@@ -74,8 +80,13 @@ actor EngineHarness {
         guard !started else { return }
         started = true
         pump = Task { [engine] in
-            for await event in engine.events {
+            for await event in engine.callEvents {
                 await self.handle(event)
+            }
+        }
+        telemetryPump = Task { [engine] in
+            for await event in engine.events {
+                await self.handleTelemetry(event)
             }
         }
         // A TLS listener alongside the default UDP/TCP pair, so an account can register over
@@ -122,6 +133,17 @@ actor EngineHarness {
 
         case let .callMediaEvent(call, mediaIndex, event):
             mediaEvents.append((call: call, mediaIndex: mediaIndex, event: event))
+        }
+    }
+
+    /// Bounded telemetry carries lossy twins of every guaranteed event plus identical
+    /// registration heartbeats — both ignored here. The one payload taken is
+    /// `.callMediaEvent(.other)`, which is telemetry-exclusive.
+    private func handleTelemetry(_ event: PJSUAEvent) async {
+        if Self.tracing { print("[TELEM] \(Self.stamp()) \(event)") }
+        if case let .callMediaEvent(call, mediaIndex, .other(fourCC)) = event {
+            mediaEvents.append((call: call, mediaIndex: mediaIndex,
+                                event: .other(fourCC: fourCC)))
         }
     }
 

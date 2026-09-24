@@ -134,6 +134,11 @@ final class PhoneModel: NSObject {
                 registration = active ? "registered (\(code))" : "not registered (\(code))"
                 note("reg: active=\(active) code=\(code) expires=\(expiration)s")
             }
+            // Event tap: the router's single app-facing relay of every event it processes.
+            // Log-only for now — the debug event view (C1) hangs off this same line.
+            await callKit.router.setEventObserver { [weak self] event in
+                self?.note("evt: \(event)")
+            }
             engineState = .running
             note("engine started — CallKit routing active")
         } catch {
