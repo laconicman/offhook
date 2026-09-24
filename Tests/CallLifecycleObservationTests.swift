@@ -100,6 +100,7 @@ final class CallLifecycleObservationTests: XCTestCase {
             .flatMap(Int.init) ?? 660
         let (caller, dial) = try await observationTarget()
         let answeredBefore = await harness.answeredIncoming.count
+        let mediaBaseline = await harness.mediaEvents.count
         let call = try await harness.engine.makeCall(to: dial, from: caller)
         try await harness.waitForCallState(call, .confirmed)
         try await harness.waitForActiveMedia(call, kind: .audio)
@@ -109,7 +110,8 @@ final class CallLifecycleObservationTests: XCTestCase {
         mark("CALL-UP caller-leg=\(call) callee-leg=\(callee.map(String.init(describing:)) ?? "none")")
         mark("IDLE-BEGIN — no hold, no DTMF, no re-INVITE for \(seconds)s. Kill the transport now.")
 
-        try await observeIdle(caller: call, callee: callee, seconds: seconds)
+        try await observeIdle(caller: call, callee: callee, seconds: seconds,
+                              mediaBaseline: mediaBaseline)
 
         // §4's other half: a *new* transaction over a dead transport should fail fast rather
         // than wait out Timer B/F (~32 s). Time it and record the state we land in.
@@ -149,6 +151,7 @@ final class CallLifecycleObservationTests: XCTestCase {
             .flatMap(Int.init) ?? 1000
         let (caller, dial) = try await observationTarget()
         let answeredBefore = await harness.answeredIncoming.count
+        let mediaBaseline = await harness.mediaEvents.count
         let call = try await harness.engine.makeCall(to: dial, from: caller)
         try await harness.waitForCallState(call, .confirmed)
         try await harness.waitForActiveMedia(call, kind: .audio)
@@ -157,7 +160,8 @@ final class CallLifecycleObservationTests: XCTestCase {
         let callee = await localCalleeLeg(newerThan: answeredBefore)
         mark("CALL-UP caller-leg=\(call) callee-leg=\(callee.map(String.init(describing:)) ?? "none")")
         mark("IDLE-BEGIN — signalling stays UP; kill RTP only for \(seconds)s.")
-        try await observeIdle(caller: call, callee: callee, seconds: seconds)
+        try await observeIdle(caller: call, callee: callee, seconds: seconds,
+                              mediaBaseline: mediaBaseline)
 
         // Signalling was never touched, so this should behave exactly like a normal hangup —
         // which is itself the check that the `udp` block really did leave TCP alone.
@@ -216,7 +220,11 @@ final class CallLifecycleObservationTests: XCTestCase {
     /// `statistics(for:)` wraps `pjsua_call_get_stream_info`, which fails once the call or its
     /// media session is gone — so a successful read is **positive** evidence that pjsua still
     /// considers the call live, which is what makes "no events arrived" mean something.
-    private func observeIdle(caller: CallID, callee: CallID?, seconds: Int) async throws {
+    /// `mediaBaseline` is the process-wide event count captured just before `makeCall`: call IDs
+    /// are recycled, so "events for this call" means "events appended after that index that carry
+    /// this ID" — filtering the whole array by ID alone would inherit an earlier call's events.
+    private func observeIdle(caller: CallID, callee: CallID?, seconds: Int,
+                             mediaBaseline: Int) async throws {
         let started = Date()
         var tick = 0
         var reportedEvents = 0
@@ -235,8 +243,10 @@ final class CallLifecycleObservationTests: XCTestCase {
                     line += " stats=UNAVAILABLE" // the call or its media session is gone
                 }
             }
-            // The harness's list is process-wide; only this run's legs count.
+            // The harness's list is process-wide; only events appended after this call's
+            // baseline, on this run's legs, count.
             let events = await harness.mediaEvents
+                .dropFirst(mediaBaseline)
                 .filter { $0.call == caller || $0.call == callee }
             line += " | mediaEvents=\(events.count)"
             mark(line)
