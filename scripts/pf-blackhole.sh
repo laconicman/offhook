@@ -52,10 +52,11 @@ MAX_SECONDS="${2:-1500}"
 if [ $# -gt 2 ]; then shift 2; HOSTS="$*"; else HOSTS="sip.linphone.org"; fi
 
 RUNDIR="${OFFHOOK_PF_RUNDIR:-/tmp/offhook-pf}"
+PRIV="$RUNDIR/root"
 ARM="$RUNDIR/arm"
 RELEASE="$RUNDIR/release"
-STATE="$RUNDIR/state.log"
-RULES="$RUNDIR/rules.conf"
+STATE="$PRIV/state.log"
+RULES="$PRIV/rules.conf"
 TOKEN=""
 
 log() { echo "$(date '+%H:%M:%S') $*" | tee -a "$STATE"; }
@@ -70,10 +71,15 @@ restore() {
     fi
     rm -f "$RULES"
     log "RESTORE: done — $(pfctl -s info 2>/dev/null | head -1)"
-    date '+%H:%M:%S' > "$RUNDIR/restored-at"
+    date '+%H:%M:%S' > "$PRIV/restored-at"
 }
 
-trap 'echo; log "INTERRUPTED"; restore; exit 130' INT TERM
+# EXIT first: any way out of the script — release, hard cap, `exit`, an untrapped signal's
+# exit path — lands in restore(). The signal trap then only has to log and exit, and the
+# EXIT trap does the restoring. HUP is the realistic case: launched as `sudo … &`, a dead
+# terminal or parent shell is exactly how the block would otherwise outlive the run.
+trap 'restore' EXIT
+trap 'echo; log "INTERRUPTED"; exit 130' HUP INT TERM
 
 [ "$(id -u)" = "0" ] || { echo "needs root: sudo $0 $MODE" >&2; exit 1; }
 
@@ -97,11 +103,22 @@ esac
 # EACCES — and a driver that does not check will happily report "armed" while nothing is
 # blocked, which reads as a *stack* finding rather than a plumbing failure. (Cost us one
 # 20-minute run, 2026-08-18.) Nothing secret lives here; it is arm/release flag files.
+#
+# Everything root *writes* lives one level down in a root-owned dir: predictable paths in a
+# 1777 directory can be pre-created as symlinks by any local user, and root's `>`/`tee -a`
+# would then truncate whatever they point at. The flags stay in $RUNDIR — being creatable by
+# the unprivileged driver is their design, and a fake arm/release costs an early block or
+# restore, not a file overwrite.
 mkdir -p "$RUNDIR"
 chmod 1777 "$RUNDIR"
-rm -f "$ARM" "$RELEASE" "$RUNDIR/blocked-at" "$RUNDIR/restored-at"
+if [ -e "$PRIV" ] && [ ! -O "$PRIV" ]; then
+    echo "$PRIV exists and is not root-owned — refusing to use it" >&2
+    exit 1
+fi
+mkdir -p "$PRIV"
+chmod 700 "$PRIV"
+rm -f "$ARM" "$RELEASE" "$PRIV/blocked-at" "$PRIV/restored-at"
 : > "$STATE"
-chmod 666 "$STATE"
 
 # Resolve through the *system* resolver. `dig` and `host` talk to a nameserver directly and
 # time out behind a full-tunnel VPN; dscacheutil asks the same resolver the app does, so it
@@ -146,10 +163,18 @@ for ip in $IPS; do
     echo "block $ACTION quick ${FILTER}to $ip"   >> "$RULES"
 done
 
-pfctl -f "$RULES" 2>&1 | grep -v '^$' | sed 's/^/  pf: /' | tee -a "$STATE"
+# A failed load must not print BLOCKED: `pfctl -f` failing while the script reports success
+# produces a convincing *invalid* observation, which is worse than no run at all.
+PFOUT=$(pfctl -f "$RULES" 2>&1)
+if [ $? -ne 0 ]; then
+    echo "$PFOUT" | grep -v '^$' | sed 's/^/  pf: /' | tee -a "$STATE"
+    log "FATAL: pfctl -f failed — nothing is blocked; aborting before the driver can arm a no-op"
+    exit 1
+fi
+[ -n "$PFOUT" ] && echo "$PFOUT" | grep -v '^$' | sed 's/^/  pf: /' | tee -a "$STATE"
 TOKEN=$(pfctl -E 2>&1 | sed -n 's/.*Token : *\([0-9]*\).*/\1/p')
 log "BLOCKED mode=$MODE token=${TOKEN:-none}"
-date '+%H:%M:%S' > "$RUNDIR/blocked-at"
+date '+%H:%M:%S' > "$PRIV/blocked-at"
 
 # Prove the block bit. pf must see the packets *before* they enter a VPN's utun interface,
 # which is not obvious a priori — verified working through a full-tunnel VPN 2026-08-18, but
@@ -162,6 +187,15 @@ for ip in $IPS; do
         log "WARNING: $ip:5060 still reachable — THE BLOCK IS NOT WORKING, results are invalid"
     else
         log "verified: $ip:5060 unreachable from the host"
+    fi
+done
+
+# Reachability can't verify a UDP-mode block (nc tests TCP), so verify the rules themselves:
+# pf must show the two `quick` rules per target that the load was asked for.
+for ip in $IPS; do
+    LOADED=$(pfctl -s rules 2>/dev/null | grep -c " $ip ")
+    if [ "$LOADED" -lt 2 ]; then
+        log "WARNING: pf shows $LOADED block rule(s) for $ip, expected 2 — THE BLOCK IS NOT LOADED, results are invalid"
     fi
 done
 
