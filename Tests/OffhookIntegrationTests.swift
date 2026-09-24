@@ -389,13 +389,22 @@ final class OffhookIntegrationTests: XCTestCase {
     func test08_registersOverTLS() async throws {
         // Never the loopback pair: 04–06 are finished with it, but retiring ACC1/ACC2 would
         // make a `-only-testing:` re-run of this method behave unlike a full-suite run.
-        guard let (slot, id) = Self.accounts.filter({ $0.key >= 3 })
+        let account: TestAccount
+        if let (slot, id) = Self.accounts.filter({ $0.key >= 3 })
                 .max(by: { $0.key < $1.key }),
-              let account = TestAccounts.all[slot] else {
-            throw XCTSkip("needs a registered account on a slot >= 3 to retire and re-register over TLS")
+           let configured = TestAccounts.all[slot] {
+            // Full suite: the account table can be full, so retire a ≥3 binding first.
+            try await harness.removeAccount(id)
+            Self.accounts[slot] = nil
+            account = configured
+        } else if let (_, configured) = TestAccounts.all.filter({ $0.key >= 3 })
+                .max(by: { $0.key < $1.key }) {
+            // `-only-testing:` re-run: nothing is registered, so add the account over TLS
+            // directly — the isolated path must exercise registration, not skip it.
+            account = configured
+        } else {
+            throw XCTSkip("needs a configured account on a slot >= 3 to register over TLS")
         }
-        try await harness.removeAccount(id)
-        Self.accounts[slot] = nil
 
         // TLS probes the *same* registrar test03 used — an override may name a different
         // host or carry URI parameters that rebuilding from `domain` would drop.

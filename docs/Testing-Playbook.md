@@ -158,8 +158,9 @@ squatting the IANA port.
   password with 403 for minutes after one failed attempt. `test02` deliberately uses a made-up
   username on a slot ≥ 3 domain.
 - **`test05` classifies rejections.** 403/429/480/486/500/503/603 skip with the code named;
-  anything else disconnecting a leg fails. 408 is deliberately excluded — no answer at all is
-  a different event from a server saying "no", and merging them hides real regressions.
+  anything else disconnecting a leg fails. 408 skips too but is named separately — no answer
+  at all is a different event from a server saying "no", and merging them hides real
+  regressions.
 - Credentials come from the environment first, then `../secrets/test-accounts.env`, which lives
   outside the repo. Never commit them, never echo them into a log.
 
@@ -205,3 +206,65 @@ something we configured.
 - **Cellular vs Wi-Fi**, and the handover between them (the M2 IP-change milestone).
 - **A device-to-device call.** Everything so far is loopback through a registrar in one process.
 - **XCTest on a device** — blocked on §2's two prerequisites.
+
+## 8. Proving a pjproject memory bug
+
+We file upstream defects often enough that this is a standing capability, not a one-off. For a
+memory-safety claim an argument from source is not currency — **an ASan trace is**. Maintainers
+merge a reproduction; they debate a reading. Everything below was derived the hard way while
+confirming [#5241](https://github.com/pjsip/pjproject/issues/5241) / PR
+[#5240](https://github.com/pjsip/pjproject/pull/5240).
+
+### Never build ASan in the working tree
+
+`pjproject/` is normally mid-PR (Darwin TLS work, several branches in flight) and a sanitizer
+build clobbers every `.a` in it. Use a throwaway worktree instead, and remove it after:
+
+```sh
+cd pjproject
+git worktree add /tmp/pj-asan HEAD          # use the session scratchpad, not /tmp, in practice
+cd /tmp/pj-asan
+CFLAGS="-g -O0 -fsanitize=address -fno-omit-frame-pointer" LDFLAGS="-fsanitize=address" \
+  ./configure --disable-video --disable-sound --disable-ssl --disable-libsrtp \
+    --disable-opencore-amr --disable-speex-codec --disable-gsm-codec --disable-ilbc-codec \
+    --disable-libwebrtc --disable-speex-aec --disable-resample --disable-g7221-codec
+make dep && for d in pjlib pjlib-util pjnath pjmedia pjsip; do make -C $d/build -j8; done
+git worktree remove --force /tmp/pj-asan    # afterwards, and check `git worktree list`
+```
+
+The `--disable-*` list is purely to cut build time; none of it affects pjsip-layer behaviour.
+
+### Four things that will bite you
+
+- **A standalone harness needs configure's defines by hand.** They are generated, not in the
+  headers, so linking a one-file reproducer against the built `.a`s fails with *"Endianness must
+  be declared for this processor"* until you pass
+  `-DPJ_AUTOCONF=1 -DPJ_IS_LITTLE_ENDIAN=1 -DPJ_IS_BIG_ENDIAN=0`.
+- **Module init order, and one non-obvious assert.** A bare pjsip harness needs
+  `pjsip_ua_init_module()` → `pjsip_inv_usage_init()` → `pjsip_100rel_init_module()` →
+  `pjsip_timer_init_module()`. `pjsip_inv_usage_init()` **asserts `on_state_changed` is
+  non-NULL**, so a no-op callback is mandatory even if you never look at a state.
+- **The caching pool hides pool-lifetime bugs, and this is the big one.**
+  `cpool_release_pool()` only calls `pj_pool_destroy_int()` when the pool's capacity exceeds the
+  largest cached size (64 KiB) or `max_capacity` would be exceeded. Otherwise it is just
+  `pj_pool_reset()` and recycled — the first block is retained unscrubbed, stale reads return
+  their correct former values, and **ASan sees nothing**. Force a real free: `max_capacity` 0 in
+  a standalone harness, or `pj_pool_alloc(pool, 128*1024)` to push it past the bound in an
+  in-tree test. Miss this and you will conclude a real bug is not there.
+- **`mod_inv` is a process-wide singleton.** `pjsip_inv_usage_init()` registers a static module,
+  and `inv_offer_answer_test` skips its own init if the id is already set. Initialising it from
+  another test file with placeholder callbacks means the offer/answer test never receives its
+  events and **hangs** rather than failing. Put INVITE-layer tests in
+  `inv_offer_answer_test.c`, where the real callbacks are already installed.
+
+### Running
+
+```sh
+pjsip/bin/pjsip-test-$(target) -w 0 -l 0 dlg_core_test inv_offer_answer_test
+```
+
+`-w 0` disables workers so logs attribute correctly. Name the suites you want: `tsx_uac_test` and
+`tsx_uas_test` wait on real retransmission timers and take tens of minutes under ASan, while
+`dlg_core_test` + `inv_offer_answer_test` together are about 8 seconds. pjproject already runs
+`pjsip-test` under ASan in CI (`.github/workflows/ci-linux.yml`), so a test that fails this way
+locally will fail there too — which is the whole point of shipping one with a bug report.
