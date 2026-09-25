@@ -72,7 +72,8 @@ struct RootView: View {
                 .autocorrectionDisabled()
 
             ForEach(model.calls) { call in
-                LabeledContent(String(call.id.uuidString.prefix(8)), value: call.state)
+                LabeledContent(call.handle ?? String(call.id.uuidString.prefix(8)),
+                               value: call.state)
                 HStack {
                     Button("Hang up", role: .destructive) { Task { await model.hangUp(call.id) } }
                     Spacer()
