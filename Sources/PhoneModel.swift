@@ -300,16 +300,21 @@ final class PhoneModel: NSObject {
         // Snapshot before the await: the field is user-editable and a mid-request edit
         // would otherwise mislabel the row with the *new* target.
         let target = dialTarget
+        // Record ownership *before* requesting: CallKit can announce the call to
+        // CXCallObserver before the transaction (and thus the router's `startCall` binding)
+        // completes — an observer fire in that window must already see us as the owner.
+        outgoingUUIDs.insert(uuid)
+        handlesByUUID[uuid] = target
         let start = CXStartCallAction(call: uuid, handle: CXHandle(type: .generic, value: target))
         do {
             try await callController.requestTransaction(with: [start])
             // No optimistic row: the observer can report the call ending *before* this
             // transaction returns, and a "requested" insert would resurrect it. CallKit
             // reports our own call to the observer either way — trust the single source.
-            outgoingUUIDs.insert(uuid)
-            handlesByUUID[uuid] = target
             note("CXStartCallAction requested → \(target)")
         } catch {
+            outgoingUUIDs.remove(uuid)
+            handlesByUUID.removeValue(forKey: uuid)
             note("start-call request failed: \(error)")
         }
     }
