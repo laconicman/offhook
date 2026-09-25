@@ -41,23 +41,30 @@ struct AccountStore {
     }
 
     /// Replace-or-append by AOR — re-saving an account updates its fields in place.
+    /// Persist first, commit second: a failed write must not leave an in-memory row that a
+    /// later successful persist would silently write (or a removal that resurrects on the
+    /// next save).
     mutating func save(_ account: SavedAccount) throws {
-        if let index = accounts.firstIndex(where: { $0.aor == account.aor }) {
-            var updated = account
-            updated.id = accounts[index].id // keep the stored identity — stable for the UI
-            accounts[index] = updated
+        var updated = accounts
+        if let index = updated.firstIndex(where: { $0.aor == account.aor }) {
+            var stored = account
+            stored.id = updated[index].id // keep the stored identity — stable for the UI
+            updated[index] = stored
         } else {
-            accounts.append(account)
+            updated.append(account)
         }
-        try persist()
+        try persist(updated)
+        accounts = updated
     }
 
     mutating func remove(_ account: SavedAccount) throws {
-        accounts.removeAll { $0.id == account.id }
-        try persist()
+        var updated = accounts
+        updated.removeAll { $0.id == account.id }
+        try persist(updated)
+        accounts = updated
     }
 
-    private func persist() throws {
+    private func persist(_ accounts: [SavedAccount]) throws {
         let data = try JSONEncoder().encode(accounts)
         try data.write(to: url, options: .atomic)
     }

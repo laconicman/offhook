@@ -46,6 +46,10 @@ final class PhoneModel: NSObject {
     private(set) var accounts: [SavedAccount] = []
     private(set) var accountStates: [UUID: String] = [:]
     private var accountIDs: [UUID: AccountID] = [:]
+    /// The saved row the router's outgoing account currently belongs to — tracked so
+    /// deleting that row can reselect a survivor instead of leaving the router pointed at
+    /// a removed engine account.
+    private var outgoingAccountID: UUID?
     private var accountStore = AccountStore()
     private let credentials = KeychainCredentialStore()
 
@@ -148,6 +152,8 @@ final class PhoneModel: NSObject {
             }
             engineState = .running
             note("engine started — CallKit routing active")
+            // Softphone-on-launch: saved accounts come up on their own.
+            await registerAll()
         } catch {
             engineState = .failed("\(error)")
             note("start failed: \(error)")
@@ -158,26 +164,36 @@ final class PhoneModel: NSObject {
     /// A failed registration still leaves the account saved — that's the point of a store.
     func register() async {
         guard engineState == .running else { note("start the engine first"); return }
-        let host = registrar.split(separator: ";").first.map(String.init) ?? registrar
-        let saved = SavedAccount(
+        // Strip the sip: scheme if the user typed one — the AOR would otherwise come out
+        // as sip:alice@sip:host, which no server can parse.
+        var host = registrar.split(separator: ";").first.map(String.init) ?? registrar
+        if host.hasPrefix("sip:") { host = String(host.dropFirst(4)) }
+        let draft = SavedAccount(
             aor: "sip:\(username)@\(host)",
             registrar: registrar.hasPrefix("sip:") ? registrar : "sip:\(registrar)",
             username: username)
         do {
-            try credentials.store(password, for: saved.credentialRequest)
-            try accountStore.save(saved)
+            try credentials.store(password, for: draft.credentialRequest)
+            try accountStore.save(draft)
             accounts = accountStore.accounts
         } catch {
             note("save failed: \(error)")
             return
         }
-        await register(saved)
+        // Register the canonical stored row: `save` preserves the existing UUID on an AOR
+        // match, and `accountIDs` is keyed by *that* — not the draft's fresh id.
+        guard let canonical = accounts.first(where: { $0.aor == draft.aor }) else { return }
+        await register(canonical)
     }
 
     /// Register one saved account — the engine fetches the secret from the Keychain itself,
     /// through the `CredentialStore` seam (the app never handles it on this path).
     func register(_ saved: SavedAccount) async {
         guard engineState == .running else { note("start the engine first"); return }
+        guard accountIDs[saved.id] == nil else {
+            note("\(saved.aor) is already registered")
+            return
+        }
         do {
             let added = try await engine.addAccount(
                 AccountConfiguration(id: saved.aor,
@@ -186,10 +202,18 @@ final class PhoneModel: NSObject {
                                      realm: saved.realm,
                                      isDefault: accountIDs.isEmpty),
                 credentials: credentials)
+            // A swipe-delete can win the race while `addAccount` is suspended — if the row
+            // is gone, take the fresh engine account down with it rather than leaving a
+            // live registration with nothing to manage it.
+            guard accounts.contains(where: { $0.id == saved.id }) else {
+                try? await engine.removeAccount(added)
+                return
+            }
             accountIDs[saved.id] = added
             // The most recently registered account becomes the outgoing leg's account —
             // a real picker arrives with the multi-call UI.
             await callKit.router.setOutgoingAccount(added)
+            outgoingAccountID = saved.id
             accountStates[saved.id] = "registering…"
             note("registering \(saved.aor)…")
         } catch {
@@ -211,6 +235,16 @@ final class PhoneModel: NSObject {
         if let id = accountIDs[saved.id] {
             try? await engine.removeAccount(id)
             accountIDs[saved.id] = nil
+        }
+        // If the removed row was the outgoing account, promote a survivor so `dial` doesn't
+        // aim the router at a dead engine id.
+        if outgoingAccountID == saved.id {
+            if let next = accountIDs.first {
+                await callKit.router.setOutgoingAccount(next.value)
+                outgoingAccountID = next.key
+            } else {
+                outgoingAccountID = nil
+            }
         }
         try? credentials.removeSecret(for: saved.credentialRequest)
         try? accountStore.remove(saved)
