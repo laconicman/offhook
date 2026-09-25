@@ -212,10 +212,7 @@ final class PhoneModel: NSObject {
             }
             engineState = .running
             note("engine started — CallKit routing active")
-            if pendingIPChange {
-                pendingIPChange = false
-                await runIPChange(reason: "changed during engine start")
-            }
+            pumpIPChange()   // drains a handoff that arrived during .starting
             // Softphone-on-launch: saved accounts come up on their own.
             await registerAll()
         } catch {
@@ -223,7 +220,9 @@ final class PhoneModel: NSObject {
             // against an engine that never came up.
             pathMonitorTask?.cancel()
             pathMonitorTask = nil
-            pendingIPChange = false
+            ipChangeRetryTask?.cancel()
+            ipChangeRetryTask = nil
+            pendingPathSignature = nil
             engineState = .failed("\(error)")
             note("start failed: \(error)")
         }
@@ -381,7 +380,10 @@ final class PhoneModel: NSObject {
     func stop() async {
         pathMonitorTask?.cancel()
         pathMonitorTask = nil
-        pendingIPChange = false
+        ipChangeRetryTask?.cancel()
+        ipChangeRetryTask = nil
+        ipChangeInFlight = false
+        pendingPathSignature = nil
         await engine.hangupAll()
         await engine.shutdown()
         engineState = .idle
@@ -395,9 +397,13 @@ final class PhoneModel: NSObject {
     /// monitor for the stream's life; the loop dies with the task on `stop()`.
     private var pathMonitorTask: Task<Void, Never>?
 
-    /// A path change that arrived while the engine was still `.starting` — replayed once
-    /// `.running` lands, since `handleIPChange()` requires a running engine.
-    private var pendingIPChange = false
+    /// Newest observed path not yet covered by a completed ip_change sequence.
+    private var pendingPathSignature: String?
+    /// A `handleIPChange()` sequence is running — pjsua skips re-entrant requests, so a
+    /// newer path must wait for `.completed` rather than be dropped mid-sequence.
+    private var ipChangeInFlight = false
+    private var ipChangeRetryTask: Task<Void, Never>?
+    private var ipChangeRetryAttempt = 0
 
     private func startPathMonitor() {
         pathMonitorTask = Task { [weak self] in
@@ -416,24 +422,49 @@ final class PhoneModel: NSObject {
                 if lastSignature == nil { lastSignature = signature; continue }
                 guard signature != lastSignature else { continue }
                 lastSignature = signature
-                if engineState == .running {
-                    await runIPChange(reason: signature)
-                } else {
-                    pendingIPChange = true
-                }
+                pendingPathSignature = signature
+                pumpIPChange()
             }
         }
     }
 
-    /// Kick pjsua's recovery: restart listeners, re-register contacts, re-INVITE live
-    /// calls. pjsua skips the sequence if one is already in progress, so rapid flaps
-    /// coalesce at the engine rather than here.
-    private func runIPChange(reason: String) async {
-        do {
-            try await engine.handleIPChange()
-            note("network path → \(reason): ip_change started")
-        } catch {
-            note("network path → \(reason): ip_change failed: \(error)")
+    /// Serial recovery pump: at most one ip_change sequence in flight. A handoff that
+    /// arrives mid-sequence stays parked in `pendingPathSignature` (newest wins — the
+    /// intermediate paths are superseded) and drains when `.completed` arrives.
+    private func pumpIPChange() {
+        guard engineState == .running, !ipChangeInFlight,
+              let signature = pendingPathSignature else { return }
+        pendingPathSignature = nil
+        ipChangeInFlight = true
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await engine.handleIPChange()
+                ipChangeRetryAttempt = 0
+                note("network path → \(signature): ip_change started")
+            } catch {
+                // Never started — no `.completed` will arrive to release in-flight.
+                ipChangeInFlight = false
+                pendingPathSignature = signature
+                note("network path → \(signature): ip_change failed: \(error)")
+                scheduleIPChangeRetry()
+            }
+        }
+    }
+
+    /// `handleIPChange()` throws *before* pjsua's sequence starts, so no progress event
+    /// will arrive — retry with growing gaps, bounded; success resets the counter.
+    private func scheduleIPChangeRetry() {
+        ipChangeRetryAttempt += 1
+        guard ipChangeRetryAttempt <= 5 else {
+            note("ip_change: giving up after \(ipChangeRetryAttempt) failed starts")
+            return
+        }
+        let delay = ipChangeRetryAttempt * 5
+        ipChangeRetryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            pumpIPChange()
         }
     }
 
@@ -515,6 +546,11 @@ final class PhoneModel: NSObject {
     private func recordEvent(_ event: PJSUAEvent) {
         events.append(EventRow(timestamp: .now, event: event))
         if events.count > Self.maxEventRows { events.removeFirst(events.count - Self.maxEventRows) }
+        if case .ipChangeProgress(let operation, _, _, _, _) = event,
+           operation == .completed {
+            ipChangeInFlight = false
+            pumpIPChange()   // a handoff may have queued while the sequence ran
+        }
         switch event {
         case .callMediaState(let call, let media):
             mediaByCall[call] = media.isEmpty ? nil : media
