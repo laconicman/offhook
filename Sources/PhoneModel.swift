@@ -24,10 +24,16 @@ final class PhoneModel: NSObject {
 
     enum EngineState: Equatable { case idle, starting, running, failed(String) }
 
-    /// The one call the bring-up UI tracks, keyed by its CallKit UUID.
+    /// One call the UI tracks, keyed by its CallKit UUID. Multi-call: the array can hold
+    /// several (parallel calls are the point of the demo); `isOnHold` mirrors `CXCall`.
+    /// `handle` is the remote party we dialed, when known — incoming calls arrive through
+    /// `CXCallObserver` which doesn't expose a handle, so they keep `nil` until the event
+    /// tap's `from` can be correlated (needs the router's call→UUID map; not exposed yet).
     struct CallSnapshot: Identifiable, Equatable {
         let id: UUID
         var state: String
+        var isOnHold: Bool = false
+        var handle: String? = nil
     }
 
     struct LogEntry: Identifiable, Equatable {
@@ -56,7 +62,7 @@ final class PhoneModel: NSObject {
     // MARK: Observable state (read by the view)
     private(set) var engineState: EngineState = .idle
     private(set) var registration = "not registered"
-    private(set) var activeCall: CallSnapshot?
+    private(set) var calls: [CallSnapshot] = []
     private(set) var log: [LogEntry] = []
     /// Structured engine-event history (the tap already feeds `log`; this keeps the typed
     /// rows so Diagnostics can format them without re-parsing text).
@@ -79,6 +85,18 @@ final class PhoneModel: NSObject {
     private var outgoingAccountID: UUID?
     private var accountStore = AccountStore()
     private let credentials = KeychainCredentialStore()
+
+    /// CallKit UUIDs we know are ours — every `dial()` request lands here. Calls reported by
+    /// `CXCallObserver` that aren't in this set are another app's (the observer is
+    /// system-wide); they're left untracked until the router can answer "is this UUID ours?"
+    /// for incoming legs too (SwiftPJSUAKit follow-up).
+    private var outgoingUUIDs: Set<UUID> = []
+    private var handlesByUUID: [UUID: String] = [:]
+    /// UUIDs the router confirmed as ours (incoming legs); `outgoingUUIDs` covers dials.
+    private var checkedOurs: Set<UUID> = []
+    /// UUIDs with an in-flight `isKnownCall` query — keeps repeated `callChanged` fires for
+    /// the same foreign call from spawning a Task per fire.
+    private var ownershipChecksInFlight: Set<UUID> = []
 
     // MARK: User input (bound from the view via @Bindable)
     // ;transport=tcp — Flexisip 407-challenges INVITE and the authenticated resend (~1.6 kB)
@@ -146,7 +164,7 @@ final class PhoneModel: NSObject {
         }
     }
     var canRegister: Bool { engineState == .running && !username.isEmpty }
-    var canDial: Bool { !accountIDs.isEmpty && activeCall == nil && !dialTarget.isEmpty }
+    var canDial: Bool { !accountIDs.isEmpty && !dialTarget.isEmpty }
 
     // MARK: Intents
 
@@ -296,23 +314,53 @@ final class PhoneModel: NSObject {
     func dial() async {
         guard !accountIDs.isEmpty else { note("register first"); return }
         let uuid = UUID()
-        let start = CXStartCallAction(call: uuid, handle: CXHandle(type: .generic, value: dialTarget))
+        // Snapshot before the await: the field is user-editable and a mid-request edit
+        // would otherwise mislabel the row with the *new* target.
+        let target = dialTarget
+        // Record ownership *before* requesting: CallKit can announce the call to
+        // CXCallObserver before the transaction (and thus the router's `startCall` binding)
+        // completes — an observer fire in that window must already see us as the owner.
+        outgoingUUIDs.insert(uuid)
+        handlesByUUID[uuid] = target
+        let start = CXStartCallAction(call: uuid, handle: CXHandle(type: .generic, value: target))
         do {
             try await callController.requestTransaction(with: [start])
-            activeCall = CallSnapshot(id: uuid, state: "requested")
-            note("CXStartCallAction requested → \(dialTarget)")
+            // No optimistic row: the observer can report the call ending *before* this
+            // transaction returns, and a "requested" insert would resurrect it. CallKit
+            // reports our own call to the observer either way — trust the single source.
+            note("CXStartCallAction requested → \(target)")
         } catch {
+            outgoingUUIDs.remove(uuid)
+            handlesByUUID.removeValue(forKey: uuid)
             note("start-call request failed: \(error)")
         }
     }
 
-    /// End the tracked call through CallKit (`CXEndCallAction` → router → `engine.hangup`).
-    func hangUp() async {
-        guard let uuid = activeCall?.id else { return }
+    /// End a call through CallKit (`CXEndCallAction` → router → `engine.hangup`).
+    func hangUp(_ uuid: UUID) async {
         do {
             try await callController.requestTransaction(with: [CXEndCallAction(call: uuid)])
         } catch {
             note("end-call request failed: \(error)")
+        }
+    }
+
+    /// Hold/resume a call through CallKit (`CXSetHeldCallAction` → router → `engine.setHold`/
+    /// `resume`). CallKit fulfils the action when the router sees the media transition.
+    func setHeld(_ uuid: UUID, onHold: Bool) async {
+        do {
+            try await callController.requestTransaction(
+                with: [CXSetHeldCallAction(call: uuid, onHold: onHold)])
+        } catch {
+            note("hold request failed: \(error)")
+        }
+    }
+
+    private func upsertCall(_ snapshot: CallSnapshot) {
+        if let i = calls.firstIndex(where: { $0.id == snapshot.id }) {
+            calls[i] = snapshot
+        } else {
+            calls.append(snapshot)
         }
     }
 
@@ -387,16 +435,47 @@ extension PhoneModel: CXCallObserverDelegate {
     /// sound (`assumeIsolated`); the requirement itself is nonisolated.
     nonisolated func callObserver(_ callObserver: CXCallObserver, callChanged call: CXCall) {
         MainActor.assumeIsolated {
+            let uuid = call.uuid
             if call.hasEnded {
-                note("call \(call.uuid.uuidString.prefix(8)) ended")
-                if activeCall?.id == call.uuid { activeCall = nil }
+                note("call \(uuid.uuidString.prefix(8)) ended")
+                calls.removeAll { $0.id == uuid }
+                outgoingUUIDs.remove(uuid)
+                handlesByUUID.removeValue(forKey: uuid)
+                checkedOurs.remove(uuid)
+                ownershipChecksInFlight.remove(uuid)
                 return
             }
-            let state = if call.hasConnected { "connected" }
-                        else if call.isOutgoing { "dialing…" }
-                        else { "ringing (incoming)" }
-            activeCall = CallSnapshot(id: call.uuid, state: state)
-            note("call \(call.uuid.uuidString.prefix(8)): \(state)")
+            let state = Self.describe(call)
+            // The observer is system-wide: a UUID is ours if we requested it (dial) or the
+            // router knows it (our provider reported it). Foreign calls get no row — the
+            // controls we render would only fail on them.
+            guard outgoingUUIDs.contains(uuid) || checkedOurs.contains(uuid) else {
+                if ownershipChecksInFlight.insert(uuid).inserted {
+                    let router = callKit.router
+                    Task { @MainActor [weak self] in
+                        let known = await router.isKnownCall(uuid)
+                        guard let self else { return }
+                        self.ownershipChecksInFlight.remove(uuid)
+                        guard known, !call.hasEnded else { return }
+                        self.checkedOurs.insert(uuid)
+                        self.upsertCall(CallSnapshot(id: uuid, state: state,
+                                                     isOnHold: call.isOnHold))
+                        self.note("call \(uuid.uuidString.prefix(8)): \(state)")
+                    }
+                }
+                return
+            }
+            upsertCall(CallSnapshot(id: uuid, state: state, isOnHold: call.isOnHold,
+                                    handle: handlesByUUID[uuid]))
+            note("call \(uuid.uuidString.prefix(8)): \(state)")
         }
+    }
+
+    private static func describe(_ call: CXCall) -> String {
+        var state = if call.hasConnected { "connected" }
+                    else if call.isOutgoing { "dialing…" }
+                    else { "ringing (incoming)" }
+        if call.isOnHold { state += " · held" }
+        return state
     }
 }

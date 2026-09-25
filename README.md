@@ -41,10 +41,13 @@ so no network fetch.
    **Username**, **Password**, and a **Dial** target that echoes audio back.
 2. **Start engine** → the Engine row should read `running` and the log show `engine started`.
 3. **Register** → watch the Registration row flip to `registered (200)`.
-4. **Dial echo test** → the call goes through CallKit: State `requested → dialing… → connected`
-   (from `CXCallObserver`); audio starts once CallKit activates the session (`didActivate` →
-   engine sound device) — you should **hear the far end**.
-5. **Hang up** (or let the far end end it) → State clears, audio released by CallKit.
+4. **Dial** → the call goes through CallKit and appears in the **Calls** list (label = the
+   dialed target): state `dialing… → connected` from `CXCallObserver`; audio starts once
+   CallKit activates the session (`didActivate` → engine sound device) — you should **hear
+   the far end**. Multiple calls can be up at once — each row gets its own **Hang up** and
+   **Hold / Resume**.
+5. **Hang up** a row (or let the far end end it) → the row clears; audio is released by
+   CallKit when the last call ends.
 
 A green run validates the whole engine: the `SerialExecutor`/one-thread model, the callback
 bridge, registration parsing, and the media-state → `pjsua_conf_connect` audio wiring.
@@ -99,8 +102,8 @@ it recovers on its own.
 - **CallKit is wired (2026-07-04)** — `SwiftPJSUAKit`'s `CallKitController` + `CallSessionRouter`
   are the sole `engine.events` consumer; the app requests actions via `CXCallController` and
   observes via `CXCallObserver` (outgoing round trip verified live). Not here yet: **PushKit /
-  VoIP push** (needs self-hosted push infra — docs §3), **video rendering**, multi-call UI, and
-  a live verification of the **incoming**-call UI (needs a second instance — Tech-Debt OH-8).
+  VoIP push** (needs self-hosted push infra — docs §3), **video rendering**, and a live
+  verification of the **incoming**-call UI (needs a second instance — Tech-Debt OH-8).
 - **Scripted smoke:** launch with `OFFHOOK_AUTOSMOKE=1` (+ `OFFHOOK_USERNAME` / `OFFHOOK_PASSWORD`
   / `OFFHOOK_REGISTRAR` / `OFFHOOK_DIAL`) to prefill and run start → register → dial with no
   taps — e.g. `SIMCTL_CHILD_OFFHOOK_AUTOSMOKE=1 … xcrun simctl launch <sim> com.laconicman.offhook`.

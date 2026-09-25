@@ -66,18 +66,26 @@ struct RootView: View {
     }
 
     @ViewBuilder private var callSection: some View {
-        Section("Call") {
+        Section("Calls") {
             TextField("Dial (sip:…)", text: $model.dialTarget)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
 
-            if let call = model.activeCall {
-                LabeledContent("State", value: call.state)
-                Button("Hang up", role: .destructive) { Task { await model.hangUp() } }
-            } else {
-                Button("Dial echo test") { Task { await model.dial() } }
-                    .disabled(!model.canDial)
+            ForEach(model.calls) { call in
+                LabeledContent(call.handle ?? String(call.id.uuidString.prefix(8)),
+                               value: call.state)
+                HStack {
+                    Button("Hang up", role: .destructive) { Task { await model.hangUp(call.id) } }
+                    Spacer()
+                    Button(call.isOnHold ? "Resume" : "Hold") {
+                        Task { await model.setHeld(call.id, onHold: !call.isOnHold) }
+                    }
+                }
+                .font(.callout)
             }
+
+            Button("Dial") { Task { await model.dial() } }
+                .disabled(!model.canDial)
         }
     }
 

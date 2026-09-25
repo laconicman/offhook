@@ -35,9 +35,11 @@ No STUN/ICE surface in the UI; blocked on `swift-pjsua` TD-14 exposing the engin
 - **Cost.** One-way / no audio behind symmetric NAT (echo endpoints mask it).
 - **Discharge.** Expose STUN/DNS settings once `swift-pjsua` TD-14 lands. (Roadmap: Later)
 
-### OH-5 — Single active call only · *deferred*
+### OH-5 — Single active call only · *discharged (2026-09-25, `feat/multi-call`)*
 
-`PhoneModel.activeCall` tracks at most one call.
+`PhoneModel.activeCall` → `calls: [CallSnapshot]` with per-row Hang up / Hold via
+CallKit transactions. Foreign `CXCallObserver` calls filtered via the router's
+`isKnownCall`.
 
 - **Cost.** No parallel calls, hold-and-swap, or conference.
 - **Discharge.** Multi-call model + UI for the feature-demo milestone. (Roadmap: Later)
