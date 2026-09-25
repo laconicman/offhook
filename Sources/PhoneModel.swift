@@ -36,10 +36,12 @@ final class PhoneModel: NSObject {
     }
 
     /// One engine event, timestamped as the tap delivered it — the Diagnostics view's row.
-    struct EventRow: Identifiable, Equatable {
+    /// Keeps the `PJSUAEvent` itself rather than a flattened string so the view can render
+    /// every field (SIP Call-IDs, stream details) instead of losing them at capture time.
+    struct EventRow: Identifiable {
         let id = UUID()
         let timestamp: Date
-        let text: String
+        let event: PJSUAEvent
     }
 
     // MARK: Observable state (read by the view)
@@ -228,47 +230,17 @@ final class PhoneModel: NSObject {
     /// Event-tap entry point: append the structured row, keep the media-slot table current,
     /// and mirror a one-liner into the shared log so actions and events stay in one timeline.
     private func recordEvent(_ event: PJSUAEvent) {
-        events.append(EventRow(timestamp: .now, text: describe(event)))
+        events.append(EventRow(timestamp: .now, event: event))
         if events.count > Self.maxEventRows { events.removeFirst(events.count - Self.maxEventRows) }
         switch event {
         case .callMediaState(let call, let media):
-            mediaByCall[call] = media
+            mediaByCall[call] = media.isEmpty ? nil : media
         case .callState(let call, .disconnected, _, _):
             mediaByCall[call] = nil
         default:
             break
         }
-        note("evt: \(event)")
-    }
-
-    /// Compact one-line rendering of a `PJSUAEvent` — Diagnostics shows these verbatim.
-    private func describe(_ event: PJSUAEvent) -> String {
-        switch event {
-        case .registrationState(let account, let active, let code, let expiration):
-            return "reg acc=\(account.raw) active=\(active) \(code) exp=\(expiration)s"
-        case .incomingCall(let account, let call, _, let from, let offeredVideo):
-            return "invite \(call) acc=\(account.raw) from=\(from ?? "?") video=\(offeredVideo)"
-        case .callState(let call, let state, _, let lastStatus):
-            return "\(call) \(state) last=\(lastStatus)"
-        case .callMediaState(let call, let media):
-            let streams = media.map { m in
-                let slot = m.audioConfSlot.map { " conf=\($0)" } ?? ""
-                let win = m.videoWindow.map { " win=\($0)" } ?? ""
-                return "\(m.index):\(m.kind) \(m.status) \(m.direction)\(slot)\(win)"
-            }.joined(separator: " ")
-            return "media \(call) [\(streams)]"
-        case .streamDestroyed(let call, let mediaIndex, let stats):
-            return "stream- \(call) idx=\(mediaIndex) \(stats.codec) tx=\(stats.transmit.packets) rx=\(stats.receive.packets) lost=\(stats.receive.lost)"
-        case .callMediaEvent(let call, let mediaIndex, let mediaEvent):
-            switch mediaEvent {
-            case .mediaTransportError(let status, let isRTP):
-                return "mediaerr \(call) idx=\(mediaIndex) \(isRTP ? "rtp" : "rtcp") status=\(status)"
-            case .audioDeviceError(let status):
-                return "auderr \(call) idx=\(mediaIndex) status=\(status)"
-            case .other(let fourCC):
-                return "pjevent \(call) idx=\(mediaIndex) \(fourCC)"
-            }
-        }
+        note("evt: \(event.diagnosticSummary)")
     }
 }
 
