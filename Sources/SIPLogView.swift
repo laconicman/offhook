@@ -14,10 +14,13 @@ struct SIPLogView: View {
                 Stepper("Show level ≤ \(maxLevel)", value: $maxLevel, in: 0...6)
             }
             Section("SIP log") {
+                let visible = model.sipLog.reversed().filter { $0.level <= maxLevel }
                 if model.sipLog.isEmpty {
                     Text("Nothing logged yet.").foregroundStyle(.secondary)
+                } else if visible.isEmpty {
+                    Text("No lines at level ≤ \(maxLevel).").foregroundStyle(.secondary)
                 } else {
-                    ForEach(model.sipLog.reversed().filter { $0.level <= maxLevel }) { row in
+                    ForEach(visible) { row in
                         VStack(alignment: .leading, spacing: 2) {
                             Text(row.text)
                                 .font(.caption.monospaced())

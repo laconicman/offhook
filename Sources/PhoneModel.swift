@@ -165,10 +165,11 @@ final class PhoneModel: NSObject {
                                             TransportConfiguration("tcp", .tcp, port: transportPort)]
             }
             configuration.transports.append(TransportConfiguration("tls", .tls, port: 0))
-            // The sink fires on pjsip's log thread; hop to the main actor before mutating
-            // observable state. `self` is @MainActor hence Sendable — safe to capture weakly.
+            // The sink fires on pjsip's log thread; stamp there (a busy main actor would
+            // misdate queued lines), then hop before mutating observable state.
             configuration.logSink = { [weak self] level, text in
-                Task { @MainActor in self?.recordSIPLog(level: level, text: text) }
+                let timestamp = Date()
+                Task { @MainActor in self?.recordSIPLog(level: level, text: text, timestamp: timestamp) }
             }
             try await engine.start(configuration)
             // Registration relay: the router owns the event stream; the app observes through it.
@@ -330,9 +331,35 @@ final class PhoneModel: NSObject {
 
     private static let maxSIPLogRows = 1000
 
-    private func recordSIPLog(level: Int32, text: String) {
-        sipLog.append(SIPLogRow(timestamp: .now, level: level, text: text))
-        if sipLog.count > Self.maxSIPLogRows { sipLog.removeFirst(sipLog.count - Self.maxSIPLogRows) }
+    private func recordSIPLog(level: Int32, text: String, timestamp: Date) {
+        sipLog.append(SIPLogRow(timestamp: timestamp, level: level, text: Self.redactAuth(text)))
+        while sipLog.count > Self.maxSIPLogRows {
+            // Evict the oldest *chatty* line first — a level-5 flood must not push the
+            // level-1 error you opened the view for out of the buffer before the filter
+            // can show it.
+            if let chatty = sipLog.firstIndex(where: { $0.level > 2 }) {
+                sipLog.remove(at: chatty)
+            } else {
+                sipLog.removeFirst()
+            }
+        }
+    }
+
+    /// SIP logs carry credentials — digest `response` values and Basic payloads — and this
+    /// buffer feeds a copyable UI. Header names stay (they're what auth debugging needs);
+    /// the credential material is blanked.
+    private static func redactAuth(_ line: String) -> String {
+        var line = line
+        while let open = line.range(of: "response=\""),
+              let close = line[open.upperBound...].firstIndex(of: "\"") {
+            line.replaceSubrange(open.upperBound..<close, with: "•••")
+        }
+        for header in ["Authorization: Basic ", "Proxy-Authorization: Basic "] {
+            if let value = line.range(of: header) {
+                line.replaceSubrange(value.upperBound..<line.endIndex, with: "<redacted>")
+            }
+        }
+        return line
     }
 
     // MARK: Diagnostics (C1)
