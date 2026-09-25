@@ -1,5 +1,6 @@
 import CallKit
 import Foundation
+import Network
 import Observation
 import SwiftPJSUA
 import SwiftPJSUAKit
@@ -189,6 +190,9 @@ final class PhoneModel: NSObject {
                 let timestamp = Date()
                 Task { @MainActor in self?.recordSIPLog(level: level, text: text, timestamp: timestamp) }
             }
+            // The monitor precedes `start()` so a handoff racing engine bind is still
+            // observed — it parks in `pendingPathSignature` and fires once `.running`.
+            startPathMonitor()
             try await engine.start(configuration)
             // Registration relay: the router owns the event stream; the app observes through it.
             // The observer is @MainActor, so this closure runs on the main actor — update directly.
@@ -208,9 +212,20 @@ final class PhoneModel: NSObject {
             }
             engineState = .running
             note("engine started — CallKit routing active")
+            pumpIPChange()   // drains a handoff that arrived during .starting
             // Softphone-on-launch: saved accounts come up on their own.
             await registerAll()
         } catch {
+            // The monitor was started before `engine.start` — don't leave it running
+            // against an engine that never came up.
+            pathMonitorTask?.cancel()
+            pathMonitorTask = nil
+            ipChangeFireTask?.cancel()
+            ipChangeFireTask = nil
+            ipChangeRetryTask?.cancel()
+            ipChangeRetryTask = nil
+            ipChangeInFlight = false
+            pendingPathSignature = nil
             engineState = .failed("\(error)")
             note("start failed: \(error)")
         }
@@ -366,9 +381,137 @@ final class PhoneModel: NSObject {
 
     /// Shut the engine down. Call from the app's scene teardown.
     func stop() async {
+        pathMonitorTask?.cancel()
+        pathMonitorTask = nil
+        ipChangeFireTask?.cancel()
+        ipChangeFireTask = nil
+        ipChangeRetryTask?.cancel()
+        ipChangeRetryTask = nil
+        ipChangeInFlight = false
+        pendingPathSignature = nil
         await engine.hangupAll()
         await engine.shutdown()
         engineState = .idle
+    }
+
+    // MARK: Network changes → engine
+
+    /// Drives the Wi-Fi ↔ cellular / loss ↔ regain handoff into `handleIPChange()` —
+    /// pjsua then restarts listeners, re-registers contacts, and re-INVITEs live calls.
+    /// `NWPathMonitor`'s own `AsyncSequence` is iOS 17+ (our floor) and retains the
+    /// monitor for the stream's life; the loop dies with the task on `stop()`.
+    private var pathMonitorTask: Task<Void, Never>?
+
+    /// Newest observed path not yet covered by a completed ip_change sequence.
+    private var pendingPathSignature: String?
+    /// A `handleIPChange()` sequence is running — pjsua skips re-entrant requests, so a
+    /// newer path must wait for `.completed` rather than be dropped mid-sequence.
+    private var ipChangeInFlight = false
+    /// Cancellable handle on the kickoff task — `stop()`/failed start must not leave
+    /// one running to schedule retries against a dead engine.
+    private var ipChangeFireTask: Task<Void, Never>?
+    private var ipChangeRetryTask: Task<Void, Never>?
+    private var ipChangeRetryAttempt = 0
+
+    private func startPathMonitor() {
+        pathMonitorTask = Task { [weak self] in
+            // The first path is the baseline, not a change — don't kick ip_change at start.
+            var lastSignature: String?
+            for await path in NWPathMonitor() {
+                guard let self, !Task.isCancelled else { return }
+                // Local addresses — what a SIP transport is actually bound to — so a
+                // same-type handoff (new DHCP lease, AP roam onto another subnet) still
+                // counts as a change; `status` alone would swallow it. The preferred-route
+                // types catch flips where every interface keeps its address but iOS starts
+                // preferring cellular over Wi-Fi (or back) — the reachability pjsua just
+                // registered under changed.
+                let routes = Self.routeTypes(in: path)
+                let signature = "\(path.status)|\(routes)|\(Self.localAddressSignature())"
+                if lastSignature == nil { lastSignature = signature; continue }
+                guard signature != lastSignature else { continue }
+                lastSignature = signature
+                // A new path gets a fresh retry budget — the old path's exhaustion
+                // must not follow the handoff.
+                ipChangeRetryAttempt = 0
+                pendingPathSignature = signature
+                pumpIPChange()
+            }
+        }
+    }
+
+    /// Serial recovery pump: at most one ip_change sequence in flight. A handoff that
+    /// arrives mid-sequence stays parked in `pendingPathSignature` (newest wins — the
+    /// intermediate paths are superseded) and drains when `.completed` arrives.
+    private func pumpIPChange() {
+        guard engineState == .running, !ipChangeInFlight,
+              let signature = pendingPathSignature else { return }
+        pendingPathSignature = nil
+        ipChangeInFlight = true
+        ipChangeFireTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await engine.handleIPChange()
+                guard !Task.isCancelled else { return }
+                ipChangeRetryAttempt = 0
+                note("network path → \(signature): ip_change started")
+            } catch {
+                guard !Task.isCancelled else { return }
+                // Never started — no `.completed` will arrive to release in-flight.
+                ipChangeInFlight = false
+                pendingPathSignature = signature
+                note("network path → \(signature): ip_change failed: \(error)")
+                scheduleIPChangeRetry()
+            }
+        }
+    }
+
+    /// `handleIPChange()` throws *before* pjsua's sequence starts, so no progress event
+    /// will arrive — retry with growing gaps, bounded; success resets the counter.
+    private func scheduleIPChangeRetry() {
+        ipChangeRetryAttempt += 1
+        guard ipChangeRetryAttempt <= 5 else {
+            note("ip_change: giving up after \(ipChangeRetryAttempt) failed starts")
+            return
+        }
+        let delay = ipChangeRetryAttempt * 5
+        ipChangeRetryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            pumpIPChange()
+        }
+    }
+
+    /// Interface types this path would actually carry traffic over (`usesInterfaceType`
+    /// tracks the preferred route, not just availability).
+    private static func routeTypes(in path: NWPath) -> String {
+        [NWInterface.InterfaceType.wifi, .cellular, .wiredEthernet, .other]
+            .filter { path.usesInterfaceType($0) }
+            .map { String(describing: $0) }
+            .joined(separator: "+")
+    }
+
+    /// Up-interface IPv4/IPv6 addresses, sorted — the route-level identity that
+    /// `NWPath` doesn't expose (`availableInterfaces` lists eligible interfaces, not
+    /// the addresses they're bound to).
+    private static func localAddressSignature() -> String {
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0 else { return "" }
+        defer { freeifaddrs(list) }
+        var parts: [String] = []
+        var cursor = list
+        while let iface = cursor?.pointee {
+            defer { cursor = iface.ifa_next }
+            guard let sa = iface.ifa_addr,
+                  iface.ifa_flags & UInt32(IFF_UP) != 0,
+                  sa.pointee.sa_family == AF_INET || sa.pointee.sa_family == AF_INET6
+            else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host,
+                              socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0
+            else { continue }
+            parts.append("\(String(cString: iface.ifa_name))=\(String(cString: host))")
+        }
+        return parts.sorted().joined(separator: ",")
     }
 
     // MARK: Log
@@ -416,6 +559,11 @@ final class PhoneModel: NSObject {
     private func recordEvent(_ event: PJSUAEvent) {
         events.append(EventRow(timestamp: .now, event: event))
         if events.count > Self.maxEventRows { events.removeFirst(events.count - Self.maxEventRows) }
+        if case .ipChangeProgress(let operation, _, _, _, _) = event,
+           operation == .completed {
+            ipChangeInFlight = false
+            pumpIPChange()   // a handoff may have queued while the sequence ran
+        }
         switch event {
         case .callMediaState(let call, let media):
             mediaByCall[call] = media.isEmpty ? nil : media
