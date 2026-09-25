@@ -407,8 +407,12 @@ final class PhoneModel: NSObject {
                 guard let self, !Task.isCancelled else { return }
                 // Local addresses — what a SIP transport is actually bound to — so a
                 // same-type handoff (new DHCP lease, AP roam onto another subnet) still
-                // counts as a change; `status` alone would swallow it.
-                let signature = "\(path.status)|\(Self.localAddressSignature())"
+                // counts as a change; `status` alone would swallow it. The preferred-route
+                // types catch flips where every interface keeps its address but iOS starts
+                // preferring cellular over Wi-Fi (or back) — the reachability pjsua just
+                // registered under changed.
+                let routes = Self.routeTypes(in: path)
+                let signature = "\(path.status)|\(routes)|\(Self.localAddressSignature())"
                 if lastSignature == nil { lastSignature = signature; continue }
                 guard signature != lastSignature else { continue }
                 lastSignature = signature
@@ -431,6 +435,15 @@ final class PhoneModel: NSObject {
         } catch {
             note("network path → \(reason): ip_change failed: \(error)")
         }
+    }
+
+    /// Interface types this path would actually carry traffic over (`usesInterfaceType`
+    /// tracks the preferred route, not just availability).
+    private static func routeTypes(in path: NWPath) -> String {
+        [NWInterface.InterfaceType.wifi, .cellular, .wiredEthernet, .other]
+            .filter { path.usesInterfaceType($0) }
+            .map { String(describing: $0) }
+            .joined(separator: "+")
     }
 
     /// Up-interface IPv4/IPv6 addresses, sorted — the route-level identity that
