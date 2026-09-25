@@ -35,11 +35,25 @@ final class PhoneModel: NSObject {
         let text: String
     }
 
+    /// One engine event, timestamped as the tap delivered it — the Diagnostics view's row.
+    struct EventRow: Identifiable, Equatable {
+        let id = UUID()
+        let timestamp: Date
+        let text: String
+    }
+
     // MARK: Observable state (read by the view)
     private(set) var engineState: EngineState = .idle
     private(set) var registration = "not registered"
     private(set) var activeCall: CallSnapshot?
     private(set) var log: [LogEntry] = []
+    /// Structured engine-event history (the tap already feeds `log`; this keeps the typed
+    /// rows so Diagnostics can format them without re-parsing text).
+    private(set) var events: [EventRow] = []
+    /// Latest media vector per engine call — the conference-slot inspector's source. Keyed
+    /// by `CallID` (the tap's events don't expose CallKit UUIDs, and don't need to — this
+    /// view is engine-facing). Filled by `.callMediaState`, evicted on `.disconnected`.
+    private(set) var mediaByCall: [CallID: [CallMediaInfo]] = [:]
 
     // MARK: User input (bound from the view via @Bindable)
     // ;transport=tcp — Flexisip 407-challenges INVITE and the authenticated resend (~1.6 kB)
@@ -134,10 +148,10 @@ final class PhoneModel: NSObject {
                 registration = active ? "registered (\(code))" : "not registered (\(code))"
                 note("reg: active=\(active) code=\(code) expires=\(expiration)s")
             }
-            // Event tap: the router's single app-facing relay of every event it processes.
-            // Log-only for now — the debug event view (C1) hangs off this same line.
+            // Event tap: the router's single app-facing relay of every event it processes —
+            // structured rows for Diagnostics (C1), plus the one-line log entry.
             await callKit.router.setEventObserver { [weak self] event in
-                self?.note("evt: \(event)")
+                self?.recordEvent(event)
             }
             engineState = .running
             note("engine started — CallKit routing active")
@@ -206,6 +220,55 @@ final class PhoneModel: NSObject {
     private func note(_ text: String) {
         log.append(LogEntry(text: text))
         if log.count > Self.maxLogLines { log.removeFirst(log.count - Self.maxLogLines) }
+    }
+
+    // MARK: Diagnostics (C1)
+    private static let maxEventRows = 300
+
+    /// Event-tap entry point: append the structured row, keep the media-slot table current,
+    /// and mirror a one-liner into the shared log so actions and events stay in one timeline.
+    private func recordEvent(_ event: PJSUAEvent) {
+        events.append(EventRow(timestamp: .now, text: describe(event)))
+        if events.count > Self.maxEventRows { events.removeFirst(events.count - Self.maxEventRows) }
+        switch event {
+        case .callMediaState(let call, let media):
+            mediaByCall[call] = media
+        case .callState(let call, .disconnected, _, _):
+            mediaByCall[call] = nil
+        default:
+            break
+        }
+        note("evt: \(event)")
+    }
+
+    /// Compact one-line rendering of a `PJSUAEvent` — Diagnostics shows these verbatim.
+    private func describe(_ event: PJSUAEvent) -> String {
+        switch event {
+        case .registrationState(let account, let active, let code, let expiration):
+            return "reg acc=\(account.raw) active=\(active) \(code) exp=\(expiration)s"
+        case .incomingCall(let account, let call, _, let from, let offeredVideo):
+            return "invite \(call) acc=\(account.raw) from=\(from ?? "?") video=\(offeredVideo)"
+        case .callState(let call, let state, _, let lastStatus):
+            return "\(call) \(state) last=\(lastStatus)"
+        case .callMediaState(let call, let media):
+            let streams = media.map { m in
+                let slot = m.audioConfSlot.map { " conf=\($0)" } ?? ""
+                let win = m.videoWindow.map { " win=\($0)" } ?? ""
+                return "\(m.index):\(m.kind) \(m.status) \(m.direction)\(slot)\(win)"
+            }.joined(separator: " ")
+            return "media \(call) [\(streams)]"
+        case .streamDestroyed(let call, let mediaIndex, let stats):
+            return "stream- \(call) idx=\(mediaIndex) \(stats.codec) tx=\(stats.transmit.packets) rx=\(stats.receive.packets) lost=\(stats.receive.lost)"
+        case .callMediaEvent(let call, let mediaIndex, let mediaEvent):
+            switch mediaEvent {
+            case .mediaTransportError(let status, let isRTP):
+                return "mediaerr \(call) idx=\(mediaIndex) \(isRTP ? "rtp" : "rtcp") status=\(status)"
+            case .audioDeviceError(let status):
+                return "auderr \(call) idx=\(mediaIndex) status=\(status)"
+            case .other(let fourCC):
+                return "pjevent \(call) idx=\(mediaIndex) \(fourCC)"
+            }
+        }
     }
 }
 

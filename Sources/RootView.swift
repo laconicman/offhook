@@ -14,6 +14,7 @@ struct RootView: View {
             Form {
                 accountSection
                 callSection
+                diagnosticsSection
                 logSection
             }
             .navigationTitle("Offhook · bring-up")
@@ -56,6 +57,14 @@ struct RootView: View {
             } else {
                 Button("Dial echo test") { Task { await model.dial() } }
                     .disabled(!model.canDial)
+            }
+        }
+    }
+
+    @ViewBuilder private var diagnosticsSection: some View {
+        Section("Diagnostics") {
+            NavigationLink("Events & conference slots") {
+                DiagnosticsView(model: model)
             }
         }
     }
