@@ -190,6 +190,9 @@ final class PhoneModel: NSObject {
                 let timestamp = Date()
                 Task { @MainActor in self?.recordSIPLog(level: level, text: text, timestamp: timestamp) }
             }
+            // The monitor precedes `start()` so a handoff racing engine bind is still
+            // observed — it lands as `pendingIPChange` and fires once `.running`.
+            startPathMonitor()
             try await engine.start(configuration)
             // Registration relay: the router owns the event stream; the app observes through it.
             // The observer is @MainActor, so this closure runs on the main actor — update directly.
@@ -209,7 +212,10 @@ final class PhoneModel: NSObject {
             }
             engineState = .running
             note("engine started — CallKit routing active")
-            startPathMonitor()
+            if pendingIPChange {
+                pendingIPChange = false
+                await runIPChange(reason: "changed during engine start")
+            }
             // Softphone-on-launch: saved accounts come up on their own.
             await registerAll()
         } catch {
@@ -370,6 +376,7 @@ final class PhoneModel: NSObject {
     func stop() async {
         pathMonitorTask?.cancel()
         pathMonitorTask = nil
+        pendingIPChange = false
         await engine.hangupAll()
         await engine.shutdown()
         engineState = .idle
@@ -383,27 +390,66 @@ final class PhoneModel: NSObject {
     /// monitor for the stream's life; the loop dies with the task on `stop()`.
     private var pathMonitorTask: Task<Void, Never>?
 
+    /// A path change that arrived while the engine was still `.starting` — replayed once
+    /// `.running` lands, since `handleIPChange()` requires a running engine.
+    private var pendingIPChange = false
+
     private func startPathMonitor() {
         pathMonitorTask = Task { [weak self] in
             // The first path is the baseline, not a change — don't kick ip_change at start.
             var lastSignature: String?
             for await path in NWPathMonitor() {
                 guard let self, !Task.isCancelled else { return }
-                let types = path.availableInterfaces
-                    .map { String(describing: $0.type) }.sorted().joined(separator: ",")
-                let signature = "\(path.status)|\(types)"
+                // Local addresses — what a SIP transport is actually bound to — so a
+                // same-type handoff (new DHCP lease, AP roam onto another subnet) still
+                // counts as a change; `status` alone would swallow it.
+                let signature = "\(path.status)|\(Self.localAddressSignature())"
                 if lastSignature == nil { lastSignature = signature; continue }
                 guard signature != lastSignature else { continue }
                 lastSignature = signature
-                guard engineState == .running else { continue }
-                do {
-                    try await engine.handleIPChange()
-                    note("network path → \(signature): ip_change started")
-                } catch {
-                    note("network path → \(signature): ip_change failed: \(error)")
+                if engineState == .running {
+                    await runIPChange(reason: signature)
+                } else {
+                    pendingIPChange = true
                 }
             }
         }
+    }
+
+    /// Kick pjsua's recovery: restart listeners, re-register contacts, re-INVITE live
+    /// calls. pjsua skips the sequence if one is already in progress, so rapid flaps
+    /// coalesce at the engine rather than here.
+    private func runIPChange(reason: String) async {
+        do {
+            try await engine.handleIPChange()
+            note("network path → \(reason): ip_change started")
+        } catch {
+            note("network path → \(reason): ip_change failed: \(error)")
+        }
+    }
+
+    /// Up-interface IPv4/IPv6 addresses, sorted — the route-level identity that
+    /// `NWPath` doesn't expose (`availableInterfaces` lists eligible interfaces, not
+    /// the addresses they're bound to).
+    private static func localAddressSignature() -> String {
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0 else { return "" }
+        defer { freeifaddrs(list) }
+        var parts: [String] = []
+        var cursor = list
+        while let iface = cursor?.pointee {
+            defer { cursor = iface.ifa_next }
+            guard let sa = iface.ifa_addr,
+                  iface.ifa_flags & UInt32(IFF_UP) != 0,
+                  sa.pointee.sa_family == AF_INET || sa.pointee.sa_family == AF_INET6
+            else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host,
+                              socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0
+            else { continue }
+            parts.append("\(String(cString: iface.ifa_name))=\(String(cString: host))")
+        }
+        return parts.sorted().joined(separator: ",")
     }
 
     // MARK: Log
