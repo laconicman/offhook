@@ -346,20 +346,18 @@ final class PhoneModel: NSObject {
     }
 
     /// SIP logs carry credentials — digest `response` values and Basic payloads — and this
-    /// buffer feeds a copyable UI. Header names stay (they're what auth debugging needs);
-    /// the credential material is blanked.
+    /// buffer feeds a copyable UI. Header/param names stay (they're what auth debugging
+    /// needs); the credential material is blanked. Case-insensitive with optional LWS:
+    /// `RESPONSE = "…"` and `response="…"` are the same header to a SIP parser.
+    private static let authRedactors: [(pattern: String, template: String)] = [
+        (#"(?i)(response\s*=\s*")[^"]*""#, #"\1•••"#),
+        (#"(?i)((?:Proxy-)?Authorization\s*:\s*Basic\s+)\S+"#, #"\1<redacted>"#),
+    ]
+
     private static func redactAuth(_ line: String) -> String {
-        var line = line
-        while let open = line.range(of: "response=\""),
-              let close = line[open.upperBound...].firstIndex(of: "\"") {
-            line.replaceSubrange(open.upperBound..<close, with: "•••")
+        authRedactors.reduce(line) {
+            $0.replacingOccurrences(of: $1.pattern, with: $1.template, options: .regularExpression)
         }
-        for header in ["Authorization: Basic ", "Proxy-Authorization: Basic "] {
-            if let value = line.range(of: header) {
-                line.replaceSubrange(value.upperBound..<line.endIndex, with: "<redacted>")
-            }
-        }
-        return line
     }
 
     // MARK: Diagnostics (C1)
