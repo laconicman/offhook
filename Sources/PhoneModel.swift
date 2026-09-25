@@ -297,15 +297,18 @@ final class PhoneModel: NSObject {
     func dial() async {
         guard !accountIDs.isEmpty else { note("register first"); return }
         let uuid = UUID()
-        let start = CXStartCallAction(call: uuid, handle: CXHandle(type: .generic, value: dialTarget))
+        // Snapshot before the await: the field is user-editable and a mid-request edit
+        // would otherwise mislabel the row with the *new* target.
+        let target = dialTarget
+        let start = CXStartCallAction(call: uuid, handle: CXHandle(type: .generic, value: target))
         do {
             try await callController.requestTransaction(with: [start])
             // No optimistic row: the observer can report the call ending *before* this
             // transaction returns, and a "requested" insert would resurrect it. CallKit
             // reports our own call to the observer either way — trust the single source.
             outgoingUUIDs.insert(uuid)
-            handlesByUUID[uuid] = dialTarget
-            note("CXStartCallAction requested → \(dialTarget)")
+            handlesByUUID[uuid] = target
+            note("CXStartCallAction requested → \(target)")
         } catch {
             note("start-call request failed: \(error)")
         }

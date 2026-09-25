@@ -102,8 +102,8 @@ it recovers on its own.
 - **CallKit is wired (2026-07-04)** — `SwiftPJSUAKit`'s `CallKitController` + `CallSessionRouter`
   are the sole `engine.events` consumer; the app requests actions via `CXCallController` and
   observes via `CXCallObserver` (outgoing round trip verified live). Not here yet: **PushKit /
-  VoIP push** (needs self-hosted push infra — docs §3), **video rendering**, multi-call UI, and
-  a live verification of the **incoming**-call UI (needs a second instance — Tech-Debt OH-8).
+  VoIP push** (needs self-hosted push infra — docs §3), **video rendering**, and a live
+  verification of the **incoming**-call UI (needs a second instance — Tech-Debt OH-8).
 - **Scripted smoke:** launch with `OFFHOOK_AUTOSMOKE=1` (+ `OFFHOOK_USERNAME` / `OFFHOOK_PASSWORD`
   / `OFFHOOK_REGISTRAR` / `OFFHOOK_DIAL`) to prefill and run start → register → dial with no
   taps — e.g. `SIMCTL_CHILD_OFFHOOK_AUTOSMOKE=1 … xcrun simctl launch <sim> com.laconicman.offhook`.
