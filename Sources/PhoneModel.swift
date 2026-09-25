@@ -41,6 +41,18 @@ final class PhoneModel: NSObject {
     private(set) var activeCall: CallSnapshot?
     private(set) var log: [LogEntry] = []
 
+    /// Saved accounts (secrets live in the Keychain, never here) and their live registration
+    /// text, keyed by `SavedAccount.id` → engine `AccountID` → status.
+    private(set) var accounts: [SavedAccount] = []
+    private(set) var accountStates: [UUID: String] = [:]
+    private var accountIDs: [UUID: AccountID] = [:]
+    /// The saved row the router's outgoing account currently belongs to — tracked so
+    /// deleting that row can reselect a survivor instead of leaving the router pointed at
+    /// a removed engine account.
+    private var outgoingAccountID: UUID?
+    private var accountStore = AccountStore()
+    private let credentials = KeychainCredentialStore()
+
     // MARK: User input (bound from the view via @Bindable)
     // ;transport=tcp — Flexisip 407-challenges INVITE and the authenticated resend (~1.6 kB)
     // fragments on UDP and is dropped silently (call never confirms); registering over TCP
@@ -60,7 +72,6 @@ final class PhoneModel: NSObject {
     private let callController = CXCallController()
     /// CallKit → app: system-truth call lifecycle for the UI.
     private let callObserver = CXCallObserver()
-    private var account: AccountID?
     private static let maxLogLines = 200
 
     /// Overrides the UDP/TCP listening port when `OFFHOOK_PORT` is set; `nil` keeps the IANA
@@ -83,6 +94,7 @@ final class PhoneModel: NSObject {
         // so one squatted port takes the whole engine down before it ever registers.
         if let value = env["OFFHOOK_PORT"], let port = UInt32(value) { transportPort = port }
         if let value = env["OFFHOOK_DIAL"] { dialTarget = value }
+        accounts = accountStore.accounts
     }
 
     /// Scripted smoke, opt-in via `OFFHOOK_AUTOSMOKE=1`: start → register → dial with no UI
@@ -107,7 +119,7 @@ final class PhoneModel: NSObject {
         }
     }
     var canRegister: Bool { engineState == .running && !username.isEmpty }
-    var canDial: Bool { account != nil && activeCall == nil && !dialTarget.isEmpty }
+    var canDial: Bool { !accountIDs.isEmpty && activeCall == nil && !dialTarget.isEmpty }
 
     // MARK: Intents
 
@@ -129,10 +141,14 @@ final class PhoneModel: NSObject {
             try await engine.start(configuration)
             // Registration relay: the router owns the event stream; the app observes through it.
             // The observer is @MainActor, so this closure runs on the main actor — update directly.
-            await callKit.router.setRegistrationObserver { [weak self] _, active, code, expiration in
+            await callKit.router.setRegistrationObserver { [weak self] account, active, code, expiration in
                 guard let self else { return }
-                registration = active ? "registered (\(code))" : "not registered (\(code))"
-                note("reg: active=\(active) code=\(code) expires=\(expiration)s")
+                let text = active ? "registered (\(code))" : "not registered (\(code))"
+                if let saved = accountIDs.first(where: { $0.value == account })?.key {
+                    accountStates[saved] = text
+                }
+                registration = text
+                note("reg[\(account)]: active=\(active) code=\(code) expires=\(expiration)s")
             }
             // Event tap: the router's single app-facing relay of every event it processes.
             // Log-only for now — the debug event view (C1) hangs off this same line.
@@ -141,39 +157,111 @@ final class PhoneModel: NSObject {
             }
             engineState = .running
             note("engine started — CallKit routing active")
+            // Softphone-on-launch: saved accounts come up on their own.
+            await registerAll()
         } catch {
             engineState = .failed("\(error)")
             note("start failed: \(error)")
         }
     }
 
+    /// Save the typed-in account (record → JSON, secret → Keychain) and register it.
+    /// A failed registration still leaves the account saved — that's the point of a store.
     func register() async {
         guard engineState == .running else { note("start the engine first"); return }
-        let id = "sip:\(username)@\(registrar.split(separator: ";").first.map(String.init) ?? registrar)"
+        // Strip the sip: scheme if the user typed one — the AOR would otherwise come out
+        // as sip:alice@sip:host, which no server can parse.
+        var host = registrar.split(separator: ";").first.map(String.init) ?? registrar
+        if host.hasPrefix("sip:") { host = String(host.dropFirst(4)) }
+        let draft = SavedAccount(
+            aor: "sip:\(username)@\(host)",
+            registrar: registrar.hasPrefix("sip:") ? registrar : "sip:\(registrar)",
+            username: username)
         do {
-            // The secret's provenance is explicit at the call site: this bring-up UI holds a
-            // typed-in password, so it wraps it. A production app would pass a Keychain-backed
-            // CredentialStore here instead — the engine never sees where it came from.
-            let added = try await engine.addAccount(
-                AccountConfiguration(
-                    id: id,
-                    registrar: "sip:\(registrar)",
-                    username: username
-                ),
-                credentials: InlineCredentialStore(password: password)
-            )
-            account = added
-            await callKit.router.setOutgoingAccount(added)
-            note("registering \(id)…")
+            try credentials.store(password, for: draft.credentialRequest)
+            try accountStore.save(draft)
+            accounts = accountStore.accounts
         } catch {
+            note("save failed: \(error)")
+            return
+        }
+        // Register the canonical stored row: `save` preserves the existing UUID on an AOR
+        // match, and `accountIDs` is keyed by *that* — not the draft's fresh id.
+        guard let canonical = accounts.first(where: { $0.aor == draft.aor }) else { return }
+        await register(canonical)
+    }
+
+    /// Register one saved account — the engine fetches the secret from the Keychain itself,
+    /// through the `CredentialStore` seam (the app never handles it on this path).
+    func register(_ saved: SavedAccount) async {
+        guard engineState == .running else { note("start the engine first"); return }
+        guard accountIDs[saved.id] == nil else {
+            note("\(saved.aor) is already registered")
+            return
+        }
+        do {
+            let added = try await engine.addAccount(
+                AccountConfiguration(id: saved.aor,
+                                     registrar: saved.registrar,
+                                     username: saved.username,
+                                     realm: saved.realm,
+                                     isDefault: accountIDs.isEmpty),
+                credentials: credentials)
+            // A swipe-delete can win the race while `addAccount` is suspended — if the row
+            // is gone, take the fresh engine account down with it rather than leaving a
+            // live registration with nothing to manage it.
+            guard accounts.contains(where: { $0.id == saved.id }) else {
+                try? await engine.removeAccount(added)
+                return
+            }
+            accountIDs[saved.id] = added
+            // The most recently registered account becomes the outgoing leg's account —
+            // a real picker arrives with the multi-call UI.
+            await callKit.router.setOutgoingAccount(added)
+            outgoingAccountID = saved.id
+            accountStates[saved.id] = "registering…"
+            note("registering \(saved.aor)…")
+        } catch {
+            accountStates[saved.id] = "add failed"
             note("addAccount failed: \(error)")
         }
+    }
+
+    /// Register every saved account — the softphone-on-launch shape.
+    func registerAll() async {
+        for saved in accounts where accountIDs[saved.id] == nil {
+            await register(saved)
+        }
+    }
+
+    /// Forget an account entirely: unregister if live, delete the Keychain item, drop the
+    /// persisted record.
+    func removeAccount(_ saved: SavedAccount) async {
+        if let id = accountIDs[saved.id] {
+            try? await engine.removeAccount(id)
+            accountIDs[saved.id] = nil
+        }
+        // If the removed row was the outgoing account, promote a survivor so `dial` doesn't
+        // aim the router at a dead engine id.
+        if outgoingAccountID == saved.id {
+            if let next = accountIDs.first {
+                await callKit.router.setOutgoingAccount(next.value)
+                outgoingAccountID = next.key
+            } else {
+                outgoingAccountID = nil
+            }
+        }
+        try? credentials.removeSecret(for: saved.credentialRequest)
+        try? accountStore.remove(saved)
+        accounts = accountStore.accounts
+        accountStates[saved.id] = nil
+        note("removed \(saved.aor)")
     }
 
     /// Request an outgoing call **through CallKit** (`CXStartCallAction`); the provider delegate
     /// forwards it to the router, which drives `engine.makeCall` and fulfills on `.confirmed`.
     func dial() async {
-        guard account != nil else { note("register first"); return }
+        guard !accountIDs.isEmpty else { note("register first"); return }
         let uuid = UUID()
         let start = CXStartCallAction(call: uuid, handle: CXHandle(type: .generic, value: dialTarget))
         do {

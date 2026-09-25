@@ -19,6 +19,11 @@ packages:
     path: ../swift-pjsua
   swift-pjsip:
     path: ../swift-pjsip
+  # dm-zharov/swift-security — Keychain mechanics for SIP secrets (docs/Credentials.md §2).
+  # Pinned by minor version; the laconicman mirror exists only as insurance.
+  SwiftSecurity:
+    url: https://github.com/dm-zharov/swift-security
+    version: 2.5.1
 
 targets:
   Offhook:
@@ -33,6 +38,8 @@ targets:
         product: SwiftPJSUA
       - package: swift-pjsua
         product: SwiftPJSUAKit
+      - package: SwiftSecurity
+        product: SwiftSecurity
     scheme:
       testTargets:
         - OffhookTests
