@@ -86,6 +86,9 @@ struct RootView: View {
             NavigationLink("Events & conference slots") {
                 DiagnosticsView(model: model)
             }
+            NavigationLink("SIP log") {
+                SIPLogView(model: model)
+            }
         }
     }
 

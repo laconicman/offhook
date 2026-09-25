@@ -87,6 +87,10 @@ extension PJSUAEvent {
             case .other(let fourCC):
                 return "pjevent \(call) idx=\(mediaIndex) \(fourCC)"
             }
+        case .callTransferStatus(let call, let statusCode, let statusText, let isFinal):
+            return "xfer \(call) \(statusCode) \(statusText)\(isFinal ? " final" : "")"
+        case .callReplaced(let call, let newCall):
+            return "replaced \(call) → \(newCall)"
         }
     }
 }

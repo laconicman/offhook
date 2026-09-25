@@ -35,6 +35,15 @@ final class PhoneModel: NSObject {
         let text: String
     }
 
+    /// One pjsip log line as delivered by the engine's `logSink` — level is the PJSIP
+    /// verbosity (0 fatal … 6 trace); `text` keeps the sender prefix pjsip already formats.
+    struct SIPLogRow: Identifiable {
+        let id = UUID()
+        let timestamp: Date
+        let level: Int32
+        let text: String
+    }
+
     /// One engine event, timestamped as the tap delivered it — the Diagnostics view's row.
     /// Keeps the `PJSUAEvent` itself rather than a flattened string so the view can render
     /// every field (SIP Call-IDs, stream details) instead of losing them at capture time.
@@ -52,6 +61,8 @@ final class PhoneModel: NSObject {
     /// Structured engine-event history (the tap already feeds `log`; this keeps the typed
     /// rows so Diagnostics can format them without re-parsing text).
     private(set) var events: [EventRow] = []
+    /// Raw SIP/pjsip log lines via the engine's `logSink` — bounded; SIP traces are chatty.
+    private(set) var sipLog: [SIPLogRow] = []
     /// Latest media vector per engine call — the conference-slot inspector's source. Keyed
     /// by `CallID` (the tap's events don't expose CallKit UUIDs, and don't need to — this
     /// view is engine-facing). Filled by `.callMediaState`, evicted on `.disconnected`.
@@ -154,6 +165,11 @@ final class PhoneModel: NSObject {
                                             TransportConfiguration("tcp", .tcp, port: transportPort)]
             }
             configuration.transports.append(TransportConfiguration("tls", .tls, port: 0))
+            // The sink fires on pjsip's log thread; hop to the main actor before mutating
+            // observable state. `self` is @MainActor hence Sendable — safe to capture weakly.
+            configuration.logSink = { [weak self] level, text in
+                Task { @MainActor in self?.recordSIPLog(level: level, text: text) }
+            }
             try await engine.start(configuration)
             // Registration relay: the router owns the event stream; the app observes through it.
             // The observer is @MainActor, so this closure runs on the main actor — update directly.
@@ -310,6 +326,13 @@ final class PhoneModel: NSObject {
     private func note(_ text: String) {
         log.append(LogEntry(text: text))
         if log.count > Self.maxLogLines { log.removeFirst(log.count - Self.maxLogLines) }
+    }
+
+    private static let maxSIPLogRows = 1000
+
+    private func recordSIPLog(level: Int32, text: String) {
+        sipLog.append(SIPLogRow(timestamp: .now, level: level, text: text))
+        if sipLog.count > Self.maxSIPLogRows { sipLog.removeFirst(sipLog.count - Self.maxSIPLogRows) }
     }
 
     // MARK: Diagnostics (C1)
