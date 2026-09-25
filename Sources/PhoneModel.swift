@@ -191,7 +191,7 @@ final class PhoneModel: NSObject {
                 Task { @MainActor in self?.recordSIPLog(level: level, text: text, timestamp: timestamp) }
             }
             // The monitor precedes `start()` so a handoff racing engine bind is still
-            // observed — it lands as `pendingIPChange` and fires once `.running`.
+            // observed — it parks in `pendingPathSignature` and fires once `.running`.
             startPathMonitor()
             try await engine.start(configuration)
             // Registration relay: the router owns the event stream; the app observes through it.
@@ -220,8 +220,11 @@ final class PhoneModel: NSObject {
             // against an engine that never came up.
             pathMonitorTask?.cancel()
             pathMonitorTask = nil
+            ipChangeFireTask?.cancel()
+            ipChangeFireTask = nil
             ipChangeRetryTask?.cancel()
             ipChangeRetryTask = nil
+            ipChangeInFlight = false
             pendingPathSignature = nil
             engineState = .failed("\(error)")
             note("start failed: \(error)")
@@ -380,6 +383,8 @@ final class PhoneModel: NSObject {
     func stop() async {
         pathMonitorTask?.cancel()
         pathMonitorTask = nil
+        ipChangeFireTask?.cancel()
+        ipChangeFireTask = nil
         ipChangeRetryTask?.cancel()
         ipChangeRetryTask = nil
         ipChangeInFlight = false
@@ -402,6 +407,9 @@ final class PhoneModel: NSObject {
     /// A `handleIPChange()` sequence is running — pjsua skips re-entrant requests, so a
     /// newer path must wait for `.completed` rather than be dropped mid-sequence.
     private var ipChangeInFlight = false
+    /// Cancellable handle on the kickoff task — `stop()`/failed start must not leave
+    /// one running to schedule retries against a dead engine.
+    private var ipChangeFireTask: Task<Void, Never>?
     private var ipChangeRetryTask: Task<Void, Never>?
     private var ipChangeRetryAttempt = 0
 
@@ -422,6 +430,9 @@ final class PhoneModel: NSObject {
                 if lastSignature == nil { lastSignature = signature; continue }
                 guard signature != lastSignature else { continue }
                 lastSignature = signature
+                // A new path gets a fresh retry budget — the old path's exhaustion
+                // must not follow the handoff.
+                ipChangeRetryAttempt = 0
                 pendingPathSignature = signature
                 pumpIPChange()
             }
@@ -436,13 +447,15 @@ final class PhoneModel: NSObject {
               let signature = pendingPathSignature else { return }
         pendingPathSignature = nil
         ipChangeInFlight = true
-        Task { [weak self] in
+        ipChangeFireTask = Task { [weak self] in
             guard let self else { return }
             do {
                 try await engine.handleIPChange()
+                guard !Task.isCancelled else { return }
                 ipChangeRetryAttempt = 0
                 note("network path → \(signature): ip_change started")
             } catch {
+                guard !Task.isCancelled else { return }
                 // Never started — no `.completed` will arrive to release in-flight.
                 ipChangeInFlight = false
                 pendingPathSignature = signature
