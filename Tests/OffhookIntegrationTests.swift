@@ -439,7 +439,85 @@ final class OffhookIntegrationTests: XCTestCase {
         print("[tls] \(account.aor) registered over TLS via \(registrar), expires in \(reg.expiration)s")
     }
 
+    // MARK: 09 — attended transfer
+
+    /// Loopback **attended** transfer (REFER with Replaces): call A is ACC1→ACC2, call B is
+    /// ACC2→ACC1, then `attendedTransfer(A, replacing: B)` REFERs A's remote leg (ACC2) into
+    /// an INVITE-with-Replaces against B's remote leg (ACC1's inbound side).
+    ///
+    /// Three observable legs of the exchange, all asserted:
+    /// 1. `.callTransferStatus` on A reaches a **final** 2xx — the REFER/NOTIFY round-trip
+    ///    succeeded (the REFER recipient reports its follow-up INVITE's outcome back).
+    /// 2. `.callReplaced` fires on B's *inbound* leg with a fresh `newCall` — pjsua answers
+    ///    INVITE-with-Replaces itself, so the replacement never passes `.incomingCall`.
+    /// 3. **The transferor leg stays `.confirmed`.** Installing `on_call_transfer_status`
+    ///    suppresses pjsua's built-in "hang up our leg on success" — that hangup is router
+    ///    policy (`CallSessionRouter`), which this harness deliberately does not run. The
+    ///    assertion pins the layering boundary: raw-engine consumers own the leg.
+    ///
+    /// Provider weather: a registrar that refuses to relay REFER (or swallows the NOTIFY
+    /// subscription) makes step 1 time out or fail non-2xx — classified weather, not a defect.
+    func test09_attendedTransfer() async throws {
+        // `harness.registerLoopbackPair` registers the pair itself, so this runs standalone
+        // under `-only-testing:` as well as inside a full-suite run.
+        let (caller, calleeAOR) = try await harness.registerLoopbackPair()
+        guard let secondAccount = await harness.account(forSlot: 2),
+              let callerAOR = TestAccounts.all[1]?.dialURI else {
+            throw XCTSkip("needs the ACC1/ACC2 same-domain pair (secrets/test-accounts.env)")
+        }
+
+        // Call A: ACC1 → ACC2 (the leg we REFER away). Call B: ACC2 → ACC1 (the leg whose
+        // inbound side gets replaced by the REFER recipient's new INVITE).
+        let callA = try await harness.engine.makeCall(to: calleeAOR, from: caller)
+        try await harness.waitForCallOutcome(callA)
+        try await harness.waitForCallState(callA, .confirmed)
+
+        let inboundBefore = await harness.answeredIncoming.count
+        let callB = try await harness.engine.makeCall(to: callerAOR, from: secondAccount)
+        try await harness.waitForCallOutcome(callB)
+        try await harness.waitForCallState(callB, .confirmed)
+        // B's inbound leg is the last auto-answered call — the one `.callReplaced` fires on.
+        guard let callBInbound = await harness.answeredIncoming.dropFirst(inboundBefore).last else {
+            try await harness.engine.hangup(callA)
+            try await harness.engine.hangup(callB)
+            return XCTFail("call B produced no inbound leg to replace")
+        }
+
+        try await harness.engine.attendedTransfer(callA, replacing: callB)
+
+        let finalStatus: Int32
+        do {
+            finalStatus = try await harness.waitForTransferFinal(callA)
+        } catch is EngineHarness.Timeout {
+            await hangUpAll([callA, callB])
+            throw XCTSkip("REFER never reached a final NOTIFY — the registrar may not relay "
+                          + "REFER (provider weather, not a defect)")
+        }
+        guard (200..<300).contains(finalStatus) else {
+            await hangUpAll([callA, callB])
+            throw XCTSkip("transfer REFER refused with SIP \(finalStatus) — provider weather")
+        }
+
+        // The replacement: ACC1's inbound leg of call B is superseded by a brand-new call
+        // that pjsua answered internally.
+        let newCall = try await harness.waitForReplaced(callBInbound)
+        try await harness.waitForCallState(newCall, .confirmed)
+
+        // Layering pin: the transferor leg is still up — the router's final-2xx hangup is
+        // not in play here. Then we end it ourselves.
+        let callAState = await harness.state(of: callA)
+        XCTAssertEqual(callAState, .confirmed,
+                       "raw engine must leave the transferor leg connected — hangup is "
+                       + "SwiftPJSUAKit policy, not pjsua's (the installed callback disables it)")
+        await hangUpAll([callA, callB, newCall])
+    }
+
     // MARK: helpers
+
+    /// Hang up every leg we know about; failures ignored — teardown must not throw.
+    private func hangUpAll(_ calls: [CallID]) async {
+        for call in calls { try? await harness.engine.hangup(call) }
+    }
 
     /// The registered same-domain pair: ACC1's AccountID (caller) + ACC2's dial URI (callee,
     /// with the server's transport param — see `TestAccount.transportSuffix`).

@@ -38,6 +38,11 @@ actor EngineHarness {
     private(set) var media: [CallID: [CallMediaInfo]] = [:]
     private(set) var answeredIncoming: [CallID] = []
 
+    /// REFER progress observed via `.callTransferStatus` (transferor side) and
+    /// `.callReplaced` pairs (transferee side) — test09 asserts on both.
+    private(set) var transferStatuses: [(call: CallID, code: Int32, final: Bool)] = []
+    private(set) var replacedCalls: [(old: CallID, new: CallID)] = []
+
     /// One per `on_stream_destroyed`, in arrival order — the end-of-stream statistics records
     /// that `Call-Quality-Statistics.md` is built on, and what test07 asserts survives a local
     /// hangup.
@@ -133,6 +138,12 @@ actor EngineHarness {
 
         case let .callMediaEvent(call, mediaIndex, event):
             mediaEvents.append((call: call, mediaIndex: mediaIndex, event: event))
+
+        case let .callTransferStatus(call, statusCode, _, isFinal):
+            transferStatuses.append((call: call, code: statusCode, final: isFinal))
+
+        case let .callReplaced(call, newCall):
+            replacedCalls.append((old: call, new: newCall))
         }
     }
 
@@ -264,6 +275,22 @@ actor EngineHarness {
                              timeout: TimeInterval = 10) async throws -> StreamRecord {
         try await poll(timeout: timeout, what: "a stream record for \(call)") {
             streamRecords.dropFirst(index).first { $0.call == call }
+        }
+    }
+
+    /// Wait for the **final** transfer notification on `call` and return its SIP status.
+    /// Interim NOTIFYs (100/180-class "ringing" reports) may precede it — only `final` ends
+    /// the transfer's implicit subscription.
+    func waitForTransferFinal(_ call: CallID, timeout: TimeInterval = 30) async throws -> Int32 {
+        try await poll(timeout: timeout, what: "final transfer status for \(call)") {
+            transferStatuses.last { $0.call == call && $0.final }?.code
+        }
+    }
+
+    /// Wait for `call` to be replaced by an INVITE-with-Replaces and return the new leg.
+    func waitForReplaced(_ call: CallID, timeout: TimeInterval = 30) async throws -> CallID {
+        try await poll(timeout: timeout, what: "\(call) to be replaced") {
+            replacedCalls.last { $0.old == call }?.new
         }
     }
 
