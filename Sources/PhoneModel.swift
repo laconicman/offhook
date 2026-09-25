@@ -219,6 +219,11 @@ final class PhoneModel: NSObject {
             // Softphone-on-launch: saved accounts come up on their own.
             await registerAll()
         } catch {
+            // The monitor was started before `engine.start` — don't leave it running
+            // against an engine that never came up.
+            pathMonitorTask?.cancel()
+            pathMonitorTask = nil
+            pendingIPChange = false
             engineState = .failed("\(error)")
             note("start failed: \(error)")
         }
