@@ -38,8 +38,28 @@ struct RootView: View {
                 Button("Start engine") { Task { await model.startEngine() } }
                     .disabled(model.engineState != .idle)
                 Spacer()
-                Button("Register") { Task { await model.register() } }
+                Button("Save & register") { Task { await model.register() } }
                     .disabled(!model.canRegister)
+            }
+        }
+
+        if !model.accounts.isEmpty {
+            Section("Saved accounts") {
+                ForEach(model.accounts) { saved in
+                    VStack(alignment: .leading) {
+                        Text(saved.aor).font(.callout.monospaced())
+                        Text(model.accountStates[saved.id] ?? "saved")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    .swipeActions {
+                        Button("Delete", role: .destructive) {
+                            Task { await model.removeAccount(saved) }
+                        }
+                    }
+                    .contextMenu {
+                        Button("Register") { Task { await model.register(saved) } }
+                    }
+                }
             }
         }
     }
