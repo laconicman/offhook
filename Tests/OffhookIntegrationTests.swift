@@ -465,6 +465,10 @@ final class OffhookIntegrationTests: XCTestCase {
               let callerAOR = TestAccounts.all[1]?.dialURI else {
             throw XCTSkip("needs the ACC1/ACC2 same-domain pair (secrets/test-accounts.env)")
         }
+        // A throw anywhere below must not strand connected legs in the process-wide harness.
+        addTeardownBlock { [harness] in
+            try? await harness.engine.hangupAll()
+        }
 
         // Call A: ACC1 → ACC2 (the leg we REFER away). Call B: ACC2 → ACC1 (the leg whose
         // inbound side gets replaced by the REFER recipient's new INVITE).
@@ -495,6 +499,12 @@ final class OffhookIntegrationTests: XCTestCase {
         }
         guard (200..<300).contains(finalStatus) else {
             await hangUpAll([callA, callB])
+            // 400/481 mean our REFER or Replaces header was malformed — a code bug, not
+            // provider weather; refusing to skip on them keeps the test a regression net.
+            if [400, 481].contains(finalStatus) {
+                XCTFail("transfer REFER failed with SIP \(finalStatus) — malformed "
+                        + "REFER/Replaces is a defect, not provider weather")
+            }
             throw XCTSkip("transfer REFER refused with SIP \(finalStatus) — provider weather")
         }
 
