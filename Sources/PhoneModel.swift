@@ -24,10 +24,12 @@ final class PhoneModel: NSObject {
 
     enum EngineState: Equatable { case idle, starting, running, failed(String) }
 
-    /// The one call the bring-up UI tracks, keyed by its CallKit UUID.
+    /// One call the UI tracks, keyed by its CallKit UUID. Multi-call: the array can hold
+    /// several (parallel calls are the point of the demo); `isOnHold` mirrors `CXCall`.
     struct CallSnapshot: Identifiable, Equatable {
         let id: UUID
         var state: String
+        var isOnHold: Bool = false
     }
 
     struct LogEntry: Identifiable, Equatable {
@@ -47,7 +49,7 @@ final class PhoneModel: NSObject {
     // MARK: Observable state (read by the view)
     private(set) var engineState: EngineState = .idle
     private(set) var registration = "not registered"
-    private(set) var activeCall: CallSnapshot?
+    private(set) var calls: [CallSnapshot] = []
     private(set) var log: [LogEntry] = []
     /// Structured engine-event history (the tap already feeds `log`; this keeps the typed
     /// rows so Diagnostics can format them without re-parsing text).
@@ -135,7 +137,7 @@ final class PhoneModel: NSObject {
         }
     }
     var canRegister: Bool { engineState == .running && !username.isEmpty }
-    var canDial: Bool { !accountIDs.isEmpty && activeCall == nil && !dialTarget.isEmpty }
+    var canDial: Bool { !accountIDs.isEmpty && !dialTarget.isEmpty }
 
     // MARK: Intents
 
@@ -282,20 +284,38 @@ final class PhoneModel: NSObject {
         let start = CXStartCallAction(call: uuid, handle: CXHandle(type: .generic, value: dialTarget))
         do {
             try await callController.requestTransaction(with: [start])
-            activeCall = CallSnapshot(id: uuid, state: "requested")
+            upsertCall(CallSnapshot(id: uuid, state: "requested"))
             note("CXStartCallAction requested → \(dialTarget)")
         } catch {
             note("start-call request failed: \(error)")
         }
     }
 
-    /// End the tracked call through CallKit (`CXEndCallAction` → router → `engine.hangup`).
-    func hangUp() async {
-        guard let uuid = activeCall?.id else { return }
+    /// End a call through CallKit (`CXEndCallAction` → router → `engine.hangup`).
+    func hangUp(_ uuid: UUID) async {
         do {
             try await callController.requestTransaction(with: [CXEndCallAction(call: uuid)])
         } catch {
             note("end-call request failed: \(error)")
+        }
+    }
+
+    /// Hold/resume a call through CallKit (`CXSetHeldCallAction` → router → `engine.setHold`/
+    /// `resume`). CallKit fulfils the action when the router sees the media transition.
+    func setHeld(_ uuid: UUID, onHold: Bool) async {
+        do {
+            try await callController.requestTransaction(
+                with: [CXSetHeldCallAction(call: uuid, onHold: onHold)])
+        } catch {
+            note("hold request failed: \(error)")
+        }
+    }
+
+    private func upsertCall(_ snapshot: CallSnapshot) {
+        if let i = calls.firstIndex(where: { $0.id == snapshot.id }) {
+            calls[i] = snapshot
+        } else {
+            calls.append(snapshot)
         }
     }
 
@@ -341,13 +361,14 @@ extension PhoneModel: CXCallObserverDelegate {
         MainActor.assumeIsolated {
             if call.hasEnded {
                 note("call \(call.uuid.uuidString.prefix(8)) ended")
-                if activeCall?.id == call.uuid { activeCall = nil }
+                calls.removeAll { $0.id == call.uuid }
                 return
             }
-            let state = if call.hasConnected { "connected" }
+            var state = if call.hasConnected { "connected" }
                         else if call.isOutgoing { "dialing…" }
                         else { "ringing (incoming)" }
-            activeCall = CallSnapshot(id: call.uuid, state: state)
+            if call.isOnHold { state += " · held" }
+            upsertCall(CallSnapshot(id: call.uuid, state: state, isOnHold: call.isOnHold))
             note("call \(call.uuid.uuidString.prefix(8)): \(state)")
         }
     }
