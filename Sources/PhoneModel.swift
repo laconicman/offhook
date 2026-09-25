@@ -35,11 +35,27 @@ final class PhoneModel: NSObject {
         let text: String
     }
 
+    /// One engine event, timestamped as the tap delivered it — the Diagnostics view's row.
+    /// Keeps the `PJSUAEvent` itself rather than a flattened string so the view can render
+    /// every field (SIP Call-IDs, stream details) instead of losing them at capture time.
+    struct EventRow: Identifiable {
+        let id = UUID()
+        let timestamp: Date
+        let event: PJSUAEvent
+    }
+
     // MARK: Observable state (read by the view)
     private(set) var engineState: EngineState = .idle
     private(set) var registration = "not registered"
     private(set) var activeCall: CallSnapshot?
     private(set) var log: [LogEntry] = []
+    /// Structured engine-event history (the tap already feeds `log`; this keeps the typed
+    /// rows so Diagnostics can format them without re-parsing text).
+    private(set) var events: [EventRow] = []
+    /// Latest media vector per engine call — the conference-slot inspector's source. Keyed
+    /// by `CallID` (the tap's events don't expose CallKit UUIDs, and don't need to — this
+    /// view is engine-facing). Filled by `.callMediaState`, evicted on `.disconnected`.
+    private(set) var mediaByCall: [CallID: [CallMediaInfo]] = [:]
 
     /// Saved accounts (secrets live in the Keychain, never here) and their live registration
     /// text, keyed by `SavedAccount.id` → engine `AccountID` → status.
@@ -150,10 +166,10 @@ final class PhoneModel: NSObject {
                 registration = text
                 note("reg[\(account)]: active=\(active) code=\(code) expires=\(expiration)s")
             }
-            // Event tap: the router's single app-facing relay of every event it processes.
-            // Log-only for now — the debug event view (C1) hangs off this same line.
+            // Event tap: the router's single app-facing relay of every event it processes —
+            // structured rows for Diagnostics (C1), plus the one-line log entry.
             await callKit.router.setEventObserver { [weak self] event in
-                self?.note("evt: \(event)")
+                self?.recordEvent(event)
             }
             engineState = .running
             note("engine started — CallKit routing active")
@@ -294,6 +310,25 @@ final class PhoneModel: NSObject {
     private func note(_ text: String) {
         log.append(LogEntry(text: text))
         if log.count > Self.maxLogLines { log.removeFirst(log.count - Self.maxLogLines) }
+    }
+
+    // MARK: Diagnostics (C1)
+    private static let maxEventRows = 300
+
+    /// Event-tap entry point: append the structured row, keep the media-slot table current,
+    /// and mirror a one-liner into the shared log so actions and events stay in one timeline.
+    private func recordEvent(_ event: PJSUAEvent) {
+        events.append(EventRow(timestamp: .now, event: event))
+        if events.count > Self.maxEventRows { events.removeFirst(events.count - Self.maxEventRows) }
+        switch event {
+        case .callMediaState(let call, let media):
+            mediaByCall[call] = media.isEmpty ? nil : media
+        case .callState(let call, .disconnected, _, _):
+            mediaByCall[call] = nil
+        default:
+            break
+        }
+        note("evt: \(event.diagnosticSummary)")
     }
 }
 
