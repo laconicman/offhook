@@ -1,5 +1,6 @@
 import CallKit
 import Foundation
+import Network
 import Observation
 import SwiftPJSUA
 import SwiftPJSUAKit
@@ -208,6 +209,7 @@ final class PhoneModel: NSObject {
             }
             engineState = .running
             note("engine started — CallKit routing active")
+            startPathMonitor()
             // Softphone-on-launch: saved accounts come up on their own.
             await registerAll()
         } catch {
@@ -366,9 +368,42 @@ final class PhoneModel: NSObject {
 
     /// Shut the engine down. Call from the app's scene teardown.
     func stop() async {
+        pathMonitorTask?.cancel()
+        pathMonitorTask = nil
         await engine.hangupAll()
         await engine.shutdown()
         engineState = .idle
+    }
+
+    // MARK: Network changes → engine
+
+    /// Drives the Wi-Fi ↔ cellular / loss ↔ regain handoff into `handleIPChange()` —
+    /// pjsua then restarts listeners, re-registers contacts, and re-INVITEs live calls.
+    /// `NWPathMonitor`'s own `AsyncSequence` is iOS 17+ (our floor) and retains the
+    /// monitor for the stream's life; the loop dies with the task on `stop()`.
+    private var pathMonitorTask: Task<Void, Never>?
+
+    private func startPathMonitor() {
+        pathMonitorTask = Task { [weak self] in
+            // The first path is the baseline, not a change — don't kick ip_change at start.
+            var lastSignature: String?
+            for await path in NWPathMonitor() {
+                guard let self, !Task.isCancelled else { return }
+                let types = path.availableInterfaces
+                    .map { String(describing: $0.type) }.sorted().joined(separator: ",")
+                let signature = "\(path.status)|\(types)"
+                if lastSignature == nil { lastSignature = signature; continue }
+                guard signature != lastSignature else { continue }
+                lastSignature = signature
+                guard engineState == .running else { continue }
+                do {
+                    try await engine.handleIPChange()
+                    note("network path → \(signature): ip_change started")
+                } catch {
+                    note("network path → \(signature): ip_change failed: \(error)")
+                }
+            }
+        }
     }
 
     // MARK: Log

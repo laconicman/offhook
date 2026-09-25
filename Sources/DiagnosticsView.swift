@@ -91,6 +91,11 @@ extension PJSUAEvent {
             return "xfer \(call) \(statusCode) \(statusText)\(isFinal ? " final" : "")"
         case .callReplaced(let call, let newCall):
             return "replaced \(call) → \(newCall)"
+        case .ipChangeProgress(let operation, let status, let account, let call, let transportID):
+            let acc = account.map { " acc=\($0.raw)" } ?? ""
+            let cl = call.map { " call=\($0)" } ?? ""
+            let tp = transportID.map { " tp=\($0)" } ?? ""
+            return "ipchange \(operation) status=\(status)\(acc)\(cl)\(tp)"
         }
     }
 }
