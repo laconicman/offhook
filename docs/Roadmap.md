@@ -20,7 +20,11 @@ See the smoke procedure in [README](../README.md) and endpoints in
   [OH-3](./Tech-Debt.md)).
 - **PushKit / hybrid VoIP push** (RFC 8599) — persisted-connection + push with no double ring.
   End-to-end push needs a self-hosted Flexisip/OpenSIPS with our APNs key
-  ([SIP-Test-Infrastructure](./SIP-Test-Infrastructure.md) §3).
+  ([SIP-Test-Infrastructure](./SIP-Test-Infrastructure.md) §3); Flexisip first, see
+  [Own-SIP-Server](./Own-SIP-Server.md).
+- **A stored instance ID** (`+sip.instance`) before push: a client that reconnects after every
+  wake-up is recognisable to the registrar only by it ([Instance-ID](./Instance-ID.md),
+  [OH-11](./Tech-Debt.md)).
 
 ## Later — debug tooling & the Swiss-knife
 
