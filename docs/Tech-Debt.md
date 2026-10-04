@@ -190,6 +190,17 @@ The user sees a running call timer, a "connected" label, and silence.
   [OH-4](#oh-4--no-stunice-configuration--deferred); upstream note:
   `../../swift-pjsua/Upstream/no-transport-death-notification-for-established-calls.md`.
 
+### OH-11 — no instance ID of our own · *open*
+
+Neither Offhook nor `swift-pjsua` sets `rfc5626_instance_id`, so pjsua's host-name-derived default
+is what a registrar sees, and only while SIP outbound is offered.
+
+- **Cost.** On iOS that default is the same on every phone. A registrar that keys bindings on the
+  instance ID (Kamailio, Flexisip) cannot tell two of our devices apart on one AOR, and one that
+  never confirms outbound loses the ID on the first refresh.
+- **Discharge.** [Instance-ID](./Instance-ID.md): an app-supplied, stored instance ID exposed
+  through the engine's account config. Wanted before push ([Roadmap](./Roadmap.md): Next).
+
 ## See Also
 
 - [Design](./Design.md) · [Roadmap](./Roadmap.md) · [Prior-Art](./Prior-Art.md)
