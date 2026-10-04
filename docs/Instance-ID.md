@@ -89,7 +89,9 @@ hardware identifier".
 | A file with `FileProtectionType.none` | readable at any time; the only store that is |
 | `UIDevice.name`, the host name | the name is the generic `"iPhone"` since iOS 16 unless the app holds a special entitlement, and the host name was `localhost` in production. Neither is unique or stable. Not candidates |
 
-A VoIP push can launch the app in exactly that window: restarted, not yet unlocked.
+Whether a VoIP push launches the app in exactly that window (restarted, not yet unlocked) is
+still an open device test ([Push-vs-Active-Socket](./Push-vs-Active-Socket.md) U4). Any
+background launch there, including that one, has to cope with the failures above.
 
 ### 4.1 What went wrong in production
 
@@ -154,8 +156,10 @@ readable before first unlock, which buys nothing while the secret is not.
 
 ### 5.1 What the user sees before first unlock
 
-A VoIP push in that window must still be reported to CallKit. The call can ring, but answering it
-cannot register or accept the INVITE until the device has been unlocked once. The app has to fail
+*Assumes iOS launches the app for a VoIP push before first unlock, which is unverified
+([Push-vs-Active-Socket](./Push-vs-Active-Socket.md) U4).* If it does, the push must still be
+reported to CallKit. The call can ring, but answering it cannot register or accept the INVITE
+until the device has been unlocked once. The app has to fail
 that answer cleanly and say why, not hang. An outgoing call does not arise there: the app cannot
 be opened. After the first unlock none of this applies until the next restart.
 
@@ -170,6 +174,8 @@ without outbound, and the pjsua log shows it once per account.
 
 ### 5.3 To verify on a device
 
+- Whether iOS launches the app for a VoIP push before first unlock at all (U4 in
+  [Push-vs-Active-Socket](./Push-vs-Active-Socket.md)); §5.1 depends on it.
 - What a Keychain query for a *missing* `AfterFirstUnlock` item returns before first unlock. If it
   is "not found", D-INST-2's "and the device is unlocked" is what keeps it safe.
 - Which of length, hyphens and case the SBC in §4.1 item 4 objects to
