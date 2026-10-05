@@ -50,6 +50,16 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         SWIFT_VERSION: "5.9"
         CODE_SIGN_STYLE: Automatic
+    # DEVELOPMENT_TEAM comes from the git-ignored Config/Local.xcconfig (see Signing.xcconfig).
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
+    # VoIP pushes (PushKit) for the RFC 8599 wake-up path. XcodeGen writes the file from
+    # `properties` on every generate, so the entitlement lives here, not in the file.
+    entitlements:
+      path: Sources/Offhook.entitlements
+      properties:
+        aps-environment: development
 
   # Live-infrastructure integration tests (standalone runner — no app host). Credentials come
   # from OFFHOOK_TEST_ACC<n>_* env vars first, then ../secrets/test-accounts.env (outside the

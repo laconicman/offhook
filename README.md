@@ -27,8 +27,9 @@ xcodegen generate          # writes Offhook.xcodeproj from project.yml
 open Offhook.xcodeproj
 ```
 
-Build & run on an iOS 17 Simulator (Audio works in the Simulator; for a device, set your signing
-team in the target). `project.yml` pins `swift-pjsip` to the **local** checkout (`../swift-pjsip`),
+Build & run on an iOS 17 Simulator (Audio works in the Simulator). For a device, copy
+`Config/Local.xcconfig.example` to `Config/Local.xcconfig` (git-ignored) and put your team ID in
+it; the push entitlement needs a real team. `project.yml` pins `swift-pjsip` to the **local** checkout (`../swift-pjsip`),
 so no network fetch.
 
 > No XcodeGen? Create an iOS App target manually (iOS 17, bundle id `com.laconicman.offhook`),
