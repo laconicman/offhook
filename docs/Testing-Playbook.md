@@ -103,7 +103,7 @@ xcrun devicectl device install app --device $D \
 xcrun devicectl device process launch --device $D --console \
   --environment-variables '{"OFFHOOK_AUTOSMOKE":"1","OFFHOOK_PORT":"0",
     "OFFHOOK_REGISTRAR":"iptel.org;transport=tls","OFFHOOK_USERNAME":"…","OFFHOOK_PASSWORD":"…"}' \
-  com.laconicman.offhook
+  io.github.laconicman.offhook
 ```
 
 Four things that will stop you, in the order you will hit them:
@@ -113,7 +113,8 @@ Four things that will stop you, in the order you will hit them:
   what this message means.
 - **`Signing for "Offhook" requires a development team`** — `project.yml` sets
   `CODE_SIGN_STYLE: Automatic` but no team, deliberately. Pass `DEVELOPMENT_TEAM=…` on the
-  command line rather than committing one. `WEJF495R4D` is the team carrying `com.laconicman.*`.
+  command line or set it once in `Config/Local.xcconfig` (git-ignored) rather than committing one.
+  `WEJF495R4D` is the team Offhook is signed with.
 - **`OFFHOOK_REGISTRAR` is a bare host, not a URI.** The app builds `sip:<user>@<registrar>`
   itself, so `sip:iptel.org;transport=tls` yields `sip:offhook@sip:iptel.org` and
   `PJSIP_EINVALIDURI`. Pass `iptel.org;transport=tls`.

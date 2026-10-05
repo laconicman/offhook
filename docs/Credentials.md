@@ -248,7 +248,7 @@ struct KeychainCredentialStore: CredentialStore {
     var keychain: Keychain = .default
 
     /// `kSecAttrService` namespace, so SIP secrets can't collide with other app secrets.
-    var service: String = "com.laconicman.offhook.sip"
+    var service: String = "io.github.laconicman.offhook.sip"
 
     func secret(for request: CredentialRequest) async throws -> String {
         // Build the query locally. `SecItemQuery` is only conditionally `Sendable` over a
@@ -371,7 +371,7 @@ Apple's access-group list for an app, **in this order** — the first entry is t
 for writes ([Sharing access to keychain items][apple-share]):
 
 1. strings in the **Keychain Access Groups** entitlement (Xcode **prefixes these with the team ID**)
-2. the **app ID** — `$(AppIdentifierPrefix)com.laconicman.offhook`
+2. the **app ID** — `$(AppIdentifierPrefix)io.github.laconicman.offhook`
 3. strings in the **App Groups** entitlement (Xcode does **not** prefix these)
 
 An *app* can be in many groups; an *item* is in exactly **one** (`kSecAttrAccessGroup`).
@@ -392,7 +392,7 @@ package must take the access group as a *parameter* and never hardcode one. swif
 
 **`$(AppIdentifierPrefix)` is a build-setting placeholder** that expands *with a trailing dot*
 inside `.entitlements`. The Swift side needs the bare team ID:
-`.keychainGroup(teamID: "J42EP42PB2", nameID: "com.laconicman.offhook.shared")` → `"J42EP42PB2.com.laconicman.offhook.shared"`.
+`.keychainGroup(teamID: "J42EP42PB2", nameID: "io.github.laconicman.offhook.shared")` → `"J42EP42PB2.io.github.laconicman.offhook.shared"`.
 
 ### 6.1 Practical upshot for Offhook and its test target
 

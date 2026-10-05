@@ -155,7 +155,7 @@ xcrun devicectl device process launch --device $D --console \
     "OFFHOOK_RUN_ID":"v7q4f2a9c1", "OFFHOOK_SCENARIO":"B1-camera-in-use",
     "OFFHOOK_ROLE":"caller", "OFFHOOK_PARAMS":"preset=640x480,camera=front",
     "OFFHOOK_PORT":"0", "OFFHOOK_REGISTRAR":"…", "OFFHOOK_USERNAME":"…" }' \
-  com.laconicman.offhook
+  io.github.laconicman.offhook
 ```
 
 - **`OFFHOOK_SCENARIO`** selects by id from a registry the pack builds at launch. Absent → the app

@@ -71,7 +71,7 @@ own voice**. Flexisip negotiated **iLBC** with our binary (SIP-verified 2026-07-
 Goal: the app **rings in the background via APNs** (PushKit VoIP push). The server holds the
 Apple credential and fires the push when an INVITE arrives for a sleeping registration; the app
 wakes, re-REGISTERs, and receives the parked INVITE. The public `sip.linphone.org` holds
-*Linphone's* APNs credentials and **will not push `com.laconicman.offhook`** — end-to-end push
+*Linphone's* APNs credentials and **will not push `io.github.laconicman.offhook`** — end-to-end push
 requires a server provisioned with *your* Apple credential (§3.3). Until then, test the
 persisted-connection INVITE path (no push) against any provider; the dedup logic
 (`CallIdentity`/`CallRegistry`) is what self-hosted push later validates.
@@ -99,19 +99,19 @@ the engine emits):
 `;pn-provider=apns;pn-param=<TeamID>.<BundleID>.voip;pn-prid=<token>` — Flexisip-compatible for
 production builds; see the sandbox trap in §3.2 step 6.
 
-### 3.2 To get a background ring for `com.laconicman.offhook` you need
+### 3.2 To get a background ring for `io.github.laconicman.offhook` you need
 
 **Apple side (one-time provisioning, developer.apple.com):**
-1. Apple Developer Program membership; App ID `com.laconicman.offhook` with the Push
+1. Apple Developer Program membership; App ID `io.github.laconicman.offhook` with the Push
    Notifications capability.
 2. An APNs credential — one of:
    - **APNs Auth Key `.p8`** + Key ID + Team ID (token auth). One key serves all your apps,
      both sandbox *and* production, never expires; valid for VoIP pushes
-     (`apns-push-type: voip`, `apns-topic: com.laconicman.offhook.voip`). The path for
+     (`apns-push-type: voip`, `apns-topic: io.github.laconicman.offhook.voip`). The path for
      OpenSIPS / Kamailio / any DIY sender.
    - **VoIP Services Certificate**, exported Keychain→`.p12`→PEM. The form **Flexisip
      requires** (its docs are cert-only): file must be named
-     `/etc/flexisip/apn/com.laconicman.offhook.voip.prod.pem` (+ a `.dev.pem` symlink for
+     `/etc/flexisip/apn/io.github.laconicman.offhook.voip.prod.pem` (+ a `.dev.pem` symlink for
      sandbox). One VoIP cert covers sandbox + production.
 
 **App / Xcode side (already in place — verify, don't re-add):**
@@ -159,7 +159,7 @@ db for a lab). Verify the server→APNs leg *alone* with the bundled tool before
 
 ```sh
 flexisip_pusher --pn-provider apns.dev \
-  --pn-param <TeamID>.com.laconicman.offhook.voip \
+  --pn-param <TeamID>.io.github.laconicman.offhook.voip \
   --pn-prid <pushkit-token-hex> --apple-push-type PushKit --debug
 # expect: "1 push notification(s) sent, 1 successfully and 0 failed."
 ```
@@ -170,7 +170,7 @@ push yourself; the whole APNs leg is one HTTP/2 request with an ES256 JWT signed
 
 ```sh
 curl --http2 -H "authorization: bearer $APNS_JWT" \
-  -H "apns-topic: com.laconicman.offhook.voip" \
+  -H "apns-topic: io.github.laconicman.offhook.voip" \
   -H "apns-push-type: voip" -H "apns-priority: 10" \
   -d '{"aps":{"call-id":"..."}}' \
   https://api.sandbox.push.apple.com/3/device/$PN_PRID   # prod: api.push.apple.com

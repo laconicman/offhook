@@ -32,7 +32,7 @@ Build & run on an iOS 17 Simulator (Audio works in the Simulator). For a device,
 it; the push entitlement needs a real team. `project.yml` pins `swift-pjsip` to the **local** checkout (`../swift-pjsip`),
 so no network fetch.
 
-> No XcodeGen? Create an iOS App target manually (iOS 17, bundle id `com.laconicman.offhook`),
+> No XcodeGen? Create an iOS App target manually (iOS 17, bundle id `io.github.laconicman.offhook`),
 > add the `Sources/` files, set `INFOPLIST_FILE = Sources/Info.plist`, and add the local
 > `../swift-pjsua` package → product **SwiftPJSUA**.
 
@@ -109,7 +109,7 @@ it recovers on its own.
   verification of the **incoming**-call UI (needs a second instance — Tech-Debt OH-8).
 - **Scripted smoke:** launch with `OFFHOOK_AUTOSMOKE=1` (+ `OFFHOOK_USERNAME` / `OFFHOOK_PASSWORD`
   / `OFFHOOK_REGISTRAR` / `OFFHOOK_DIAL`) to prefill and run start → register → dial with no
-  taps — e.g. `SIMCTL_CHILD_OFFHOOK_AUTOSMOKE=1 … xcrun simctl launch <sim> com.laconicman.offhook`.
+  taps — e.g. `SIMCTL_CHILD_OFFHOOK_AUTOSMOKE=1 … xcrun simctl launch <sim> io.github.laconicman.offhook`.
 - The app and the test suite **can't run on one simulator at the same time** — both bind SIP
   port 5060 (the second engine start fails with "Address already in use"). Terminate one first.
 
