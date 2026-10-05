@@ -124,10 +124,23 @@ final class PhoneModel: NSObject {
     /// defaults. Debug-tool hook only — see `init()`.
     private var transportPort: UInt32?
 
+    // MARK: VoIP push (RFC 8599 wake-up)
+
+    /// The PushKit VoIP token as hex (the Contact's `pn-prid`), once iOS has issued one.
+    private(set) var pushToken: String?
+    private var pushRegistrar: PushRegistrar?
+    /// What a push-enabled account asks the registrar for. A suspended app refreshes nothing,
+    /// so the binding, and the push target with it, must outlive the suspension.
+    private static let pushRegistrationTimeout: UInt32 = 3600
+
     override init() {
         callKit = CallKitController(engine: engine)
         super.init()
         callObserver.setDelegate(self, queue: .main)
+        pushRegistrar = PushRegistrar(
+            handler: VoIPPushHandler(engine: engine, callKit: callKit),
+            tokenChanged: { [weak self] token in self?.pushTokenChanged(token) },
+            callReported: { [weak self] in await self?.wakeForPush() })
         // Debug-tool hooks: prefill the fields from the environment (`simctl launch` with
         // SIMCTL_CHILD_*, or an Xcode scheme), so scripted smokes and the two-sim harness
         // (Tech-Debt OH-8) never need UI typing. Absent variables leave the defaults.
@@ -271,6 +284,8 @@ final class PhoneModel: NSObject {
                                      registrar: saved.registrar,
                                      username: saved.username,
                                      realm: saved.realm,
+                                     push: pushConfiguration,
+                                     registrationTimeout: pushConfiguration == nil ? nil : Self.pushRegistrationTimeout,
                                      isDefault: accountIDs.isEmpty),
                 credentials: credentials)
             // A swipe-delete can win the race while `addAccount` is suspended — if the row
@@ -297,6 +312,67 @@ final class PhoneModel: NSObject {
     func registerAll() async {
         for saved in accounts where accountIDs[saved.id] == nil {
             await register(saved)
+        }
+    }
+
+    // MARK: VoIP push
+
+    /// RFC 8599 Contact parameters for this build, or `nil` without a token or a team prefix
+    /// (an unsigned build). Debug builds get sandbox tokens, so they ask for `apns.dev`, the
+    /// Flexisip provider name for the sandbox endpoint; release builds ask for `apns`.
+    private var pushConfiguration: PushConfiguration? {
+        guard let pushToken, let teamID = Self.teamID,
+              let bundleID = Bundle.main.bundleIdentifier else { return nil }
+        #if DEBUG
+        let provider = "apns.dev"
+        #else
+        let provider = "apns"
+        #endif
+        return PushConfiguration(
+            params: ";pn-provider=\(provider);pn-param=\(teamID).\(bundleID).voip;pn-prid=\(pushToken)")
+    }
+
+    /// The team ID, from the signed app's `AppIdentifierPrefix` (`"ABCDE12345."`).
+    private static let teamID: String? = (Bundle.main.object(forInfoDictionaryKey: "AppIdentifierPrefix") as? String)
+        .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ".")) }
+        .flatMap { $0.isEmpty ? nil : $0 }
+
+    /// A new or rotated token re-registers live accounts with it. Accounts added before the
+    /// first token keep pjsua's 300 s expiry until they are added again: the expiry is set on
+    /// add only.
+    private func pushTokenChanged(_ token: String?) {
+        guard token != pushToken else { return }
+        pushToken = token
+        guard let token else {
+            note("push token invalidated")
+            return
+        }
+        note("push token \(token.prefix(8))…")
+        guard let push = pushConfiguration else {
+            note("no team prefix in this build: REGISTER carries no push parameters")
+            return
+        }
+        for account in accountIDs.values {
+            Task { try? await engine.reRegister(account, updatingPush: push) }
+        }
+    }
+
+    /// After a VoIP push has been reported to CallKit: start the engine if the push launched
+    /// the app; otherwise run an ip_change through the network-change pump. iOS closed the
+    /// TCP connection while the app was suspended and pjsip never saw it, so a plain
+    /// re-REGISTER can wait on the dead socket until its transaction times out (~33 s);
+    /// ip_change shuts the transports down and registers over a fresh connection at once.
+    /// Either way the new registration is what makes the server hand over the INVITE.
+    private func wakeForPush() async {
+        note("VoIP push — waking the engine")
+        switch engineState {
+        case .idle:
+            await startEngine()
+        case .running:
+            pendingPathSignature = "VoIP push wake-up"
+            pumpIPChange()
+        case .starting, .failed:
+            break
         }
     }
 
