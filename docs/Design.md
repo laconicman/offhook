@@ -68,6 +68,45 @@ checkout — the shared package identity overrides the GitHub `branch:main` edge
 **Rejected.** Committing the `.xcodeproj` — it churns on every Xcode touch and would let the
 transitive dependency drift back to the remote.
 
+## Logging: `Logger` categories under one subsystem; pjsip through `logSink`
+
+**Decision.** Offhook's own lines go to the unified log only. They use static `Logger`s
+(`Logger+Offhook.swift`) with the bundle ID as the subsystem and six categories: `app`, `engine`,
+`accounts`, `calls`, `push`, `pjsip`. `PhoneModel.note(_:to:level:)` is the model's one funnel; it
+writes to the on-screen log and OSLog. pjsip's own lines arrive through the engine's `logSink`.
+`PJSIPLog` scrubs each line once and sends it to `Logger.pjsip`, with pjsip's level mapped to an
+OSLog type. Debug builds also write it to a SIP log file: one per launch in `Library/Caches/Logs/`,
+each line a single `write(2)` on an `O_APPEND` descriptor. The Kit logs under its own subsystem,
+`io.github.laconicman.SwiftPJSUAKit`. How to read all of it from the Mac:
+[Testing-Playbook](./Testing-Playbook.md) §9.
+
+**Debug builds log public; release builds stay private by default.** A debug build only carries
+test accounts, and a collected log full of `<private>` cannot be debugged from the Mac. Secrets
+stay out either way:
+- passwords are never interpolated;
+- the push token appears only as its first 8 hex digits;
+- pjsip lines lose digest `response` values, Basic credentials and `pn-prid` before any sink
+  sees them.
+
+This is a deliberate exception to [Prior-Art](./Prior-Art.md) §1.4 ("privacy by default, no
+denylist redaction"). Release builds keep that rule. In debug builds the scrub is a backstop
+behind "never interpolate a secret", not the privacy mechanism.
+
+**Why a SIP file, and why not pjsua's own.** An iOS app can't read the unified-log lines of a
+process iOS already killed, even its own: on iOS the only `OSLogStore` scope is
+`.currentProcessIdentifier` (`.system` is macOS-only). From the Mac only `sudo log collect`
+(or a sysdiagnose) reaches those lines, and `.debug` lines aren't kept. pjsua's `log_filename` won't do either:
+`log_writer` writes it with stdio `fwrite` and the flush is commented out (`pjsua_core.c`; Darwin
+builds `file_io_ansi.c`). So the buffered tail is lost when iOS SIGKILLs a suspended app, and
+those last lines are the push-handling ones. The file is also unscrubbed.
+
+**Rejected.**
+- A subsystem parameter on the libraries. A subsystem names the code that emits the line, as
+  Apple's frameworks' subsystems do, and a host app combines two in one predicate.
+- Writing the app's own lines to a file as well, the dual OSLog-plus-file shape a production app
+  needs for in-app log export. That waits for log sharing ([Roadmap](./Roadmap.md)).
+- swift-log or XCGLogger: dependencies that buy nothing here.
+
 ## Constraints (inherited, not chosen here)
 
 - **iOS 17+.** Floor set by `swift-pjsua` (SE-0392 custom executors).

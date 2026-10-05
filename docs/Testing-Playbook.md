@@ -123,6 +123,8 @@ Four things that will stop you, in the order you will hit them:
 Terminate between runs (`devicectl device process terminate --pid …`); a live app keeps
 re-registering every 60 s.
 
+To read what the app logs, live or after iOS has killed it, see §9.
+
 ## 4. Port 5060 is not yours on a real phone
 
 `PJSUA.start()` is fail-fast (TD-18): if one listener cannot bind, the whole engine throws.
@@ -269,3 +271,112 @@ pjsip/bin/pjsip-test-$(target) -w 0 -l 0 dlg_core_test inv_offer_answer_test
 `dlg_core_test` + `inv_offer_answer_test` together are about 8 seconds. pjproject already runs
 `pjsip-test` under ASan in CI (`.github/workflows/ci-linux.yml`), so a test that fails this way
 locally will fail there too — which is the whole point of shipping one with a bug report.
+
+## 9. Reading the device from the Mac
+
+What a session on the Mac can read from a phone running a debug build, and how. Verified
+2026-10-05 on an iPhone 16 Pro (iOS 26.6.2) with Xcode 27 (`devicectl` 642.16). Design and
+privacy rules: [Design](./Design.md), "Logging".
+
+| Source | Unified log | Debug builds also |
+|---|---|---|
+| Offhook (`PhoneModel.note`, scene phase) | subsystem = bundle ID; categories `app`, `engine`, `accounts`, `calls`, `push` | — |
+| SwiftPJSUAKit | subsystem `io.github.laconicman.SwiftPJSUAKit` | — |
+| pjsip, via the engine's `logSink` | category `pjsip`, level mapped below | `Library/Caches/Logs/sip-<UTC>.log` |
+
+One predicate reads all of it: `subsystem BEGINSWITH "io.github.laconicman"`.
+
+| pjsip level | OSLog type | Kept by the unified log | Measured |
+|---|---|---|---|
+| 0 fatal | fault | on disk | — |
+| 1 error | error | on disk | in `log collect` |
+| 2 warning | default | on disk | — |
+| 3 info, 4 debug (4 = whole SIP messages) | info | memory only | `log collect` kept the newest 11 of 39 for one launch |
+| 5–6 trace | debug | not kept | not in the `--console` mirror either; read the SIP file |
+
+The SIP file has every level. Lines pjsip writes before `pjsua_init()` (pjlib init, endpoint
+creation) go to stdout only; neither the sink nor pjsua's own log file ever sees them.
+
+### Live: launch with the console attached
+
+```sh
+D=<device-udid>                      # xcrun devicectl list devices
+xcrun devicectl device process launch --device $D --console --terminate-existing \
+  --environment-variables '{"OS_ACTIVITY_DT_MODE":"YES","OFFHOOK_PORT":"0"}' \
+  io.github.laconicman.offhook 2>&1 | tee offhook-console.log
+```
+
+`OS_ACTIVITY_DT_MODE=YES` makes the unified log mirror `Logger` lines to stderr. On the device
+it mirrored every default, info and error line and no debug lines (pjsip levels 1, 3 and 4 all
+arrived; level 5 never did). Private values arrive in clear, because the mirror renders inside
+the process.
+`--console` connects the app's stderr to the terminal. An agent runs this in the background into
+a file and reads the file. Lines look like this; the category shows and the subsystem doesn't:
+
+```
+2026-10-05 23:10:58.709812+0300 Offhook[27612:14930888] [accounts] registering sip:u22@192.168.100.4:5062…
+```
+
+The console stays attached while the app is in the background, so a **warm** push (app
+suspended, not killed) streams live: `[app] scene background` → `[VoIPPushHandler] VoIP push: …`
+→ `[VoIPPushHandler] VoIP push reported to CallKit as …` → `[push] VoIP push — waking the engine
+(running)` → `[engine] evt: ipchange …` → `[pjsip] … REGISTER`.
+
+It cannot attach to a process iOS starts itself. A **cold** push launch has no console, and no
+environment variables either, so `OFFHOOK_*` hooks don't apply to it.
+
+On the simulator: `SIMCTL_CHILD_OS_ACTIVITY_DT_MODE=YES xcrun simctl launch --console-pty …`,
+or `xcrun simctl spawn <sim> log stream --level debug --predicate 'subsystem BEGINSWITH "io.github.laconicman"'`.
+
+### After the fact: the SIP file (no sudo, nothing to install)
+
+```sh
+xcrun devicectl device info files --device $D --domain-type appDataContainer \
+  --domain-identifier io.github.laconicman.offhook --subdirectory Library/Caches/Logs
+xcrun devicectl device copy from --device $D --domain-type appDataContainer \
+  --domain-identifier io.github.laconicman.offhook --source Library/Caches/Logs \
+  --destination device-logs
+grep '^[0-2] ' device-logs/sip-*.log  # the pjsip level leads each entry: warnings and worse
+```
+
+One file per launch, newest five kept, written line by line, so a run iOS killed loses nothing.
+A whole SIP message is one entry: the level leads its first line and the rest follow as written.
+It is the quickest answer to "what did the engine do on that push". On its first use it showed
+why a cold push launch never registered: `bind() error: Address already in use [status=120048]`.
+A push launch has no `OFFHOOK_PORT=0`, so the engine tried 5060 (§4).
+
+### After the fact: the app's own lines
+
+The device's unified log holds the only copy of the app's lines. The app can't read lines from
+an earlier process: on iOS `OSLogStore` is `.currentProcessIdentifier` only.
+
+- **`sudo log collect` works** and needs your password, so the owner runs it:
+
+  ```sh
+  sudo log collect --device-udid $D --last 10m --output cold.logarchive    # ~220 MB for 10 min
+  log show --archive cold.logarchive --info --debug --style compact \
+    --predicate 'subsystem BEGINSWITH "io.github.laconicman"'
+  ```
+
+  It returned a whole cold push launch: `launch` with no `scene` line after it (iOS started the
+  app in the background), the Kit's receipt and report, `waking the engine (idle)`, and
+  `start failed: PJSUAError(120048: Address already in use)`. A value the Kit logs as private
+  shows as `<mask.hash: '…'>`.
+- **`xcrun devicectl device sysdiagnose` does not work here.** Every call, `--dry-run-only`
+  included, fails with `CoreDeviceCLISupport.DiagnoseError error 0`, whether the phone is locked
+  or not.
+
+### Considered, not adopted yet
+
+- **libimobiledevice `idevicesyslog`** (Homebrew 1.4.0, released 2025-10-10, LGPL-2.1). It
+  streams the device log live, cold launches included, with no sudo.
+  - **How it works:** it talks to Apple's `usbmuxd` (`/var/run/usbmuxd`, which any local user
+    can open), uses the existing host pairing record that usbmuxd hands out, and starts the
+    phone's `com.apple.os_trace_relay` service.
+  - **Trust:** installing it adds a tool, not a privilege. But that pairing can also back up the
+    phone and install apps, so you are trusting the Homebrew build.
+  - **Limits:** its output has no subsystem or category, so filter with `-p Offhook` and
+    `-m <text>`. Untested with iOS 26.
+- **pymobiledevice3** (GPL-3.0, Python). `syslog live` streams structured lines with filters. Its
+  iOS 17+ developer services need a tunnel, which needs sudo.
+- **Console.app** shows the device live, but it is a GUI, which an agent can't drive well.
