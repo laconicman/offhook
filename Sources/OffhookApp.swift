@@ -1,3 +1,4 @@
+import os
 import SwiftUI
 
 /// Offhook — the swift-pjsua bring-up / debug softphone.
@@ -8,10 +9,16 @@ import SwiftUI
 @main
 struct OffhookApp: App {
     @State private var model = PhoneModel()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             RootView(model: model)
+        }
+        // Foreground/background in the log, so a push that arrives in the background is visible
+        // as one.
+        .onChange(of: scenePhase) { _, phase in
+            Logger.app.notice("scene \(String(describing: phase), privacy: .public)")
         }
     }
 }
