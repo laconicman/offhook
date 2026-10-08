@@ -1,0 +1,82 @@
+{
+  "fill": {
+    "linear-gradient": [
+      "srgb:0.137,0.169,0.220,1",
+      "srgb:0.071,0.086,0.118,1"
+    ],
+    "orientation": {
+      "start": {
+        "x": 0.5,
+        "y": 0
+      },
+      "stop": {
+        "x": 0.5,
+        "y": 1
+      }
+    }
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "fill-specializations": [
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "gray:1.0,1"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "handset.svg",
+          "name": "handset"
+        }
+      ],
+      "lighting": "individual",
+      "name": "Handset",
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.7
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": true,
+        "value": 0.15
+      }
+    },
+    {
+      "layers": [
+        {
+          "fill-specializations": [
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "gray:0.40,1"
+              }
+            }
+          ],
+          "glass": false,
+          "image-name": "cradle.svg",
+          "name": "cradle"
+        }
+      ],
+      "lighting": "individual",
+      "name": "Cradle",
+      "shadow": {
+        "kind": "none",
+        "opacity": 0.5
+      },
+      "specular": false,
+      "translucency": {
+        "enabled": true,
+        "value": 0
+      }
+    }
+  ],
+  "supported-platforms": {
+    "circles": [
+      "watchOS"
+    ],
+    "squares": "shared"
+  }
+}
