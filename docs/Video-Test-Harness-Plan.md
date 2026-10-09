@@ -23,7 +23,7 @@ with no marker is a design proposal, not a statement about the world.
 |---|---|
 | [`Testing-Playbook.md`](./Testing-Playbook.md) §2 | Tool-hosted XCTest cannot run on device destinations; `OffhookTests` cannot be app-hosted until `swift-pjsua` **TD-28** adds three frameworks and the process-global-pjsua ownership question is settled. **The harness is therefore not a test bundle.** |
 | [`Testing-Playbook.md`](./Testing-Playbook.md) §3 | The app *is* the device harness. `OFFHOOK_*` environment variables reach it via `devicectl device process launch --environment-variables`, and `PhoneModel.init()` already reads them. **The selection mechanism exists; this plan extends the variable set.** |
-| [`Testing-Playbook.md`](./Testing-Playbook.md) §4 | `OFFHOOK_PORT=0` on device; 5060 is held by other softphones and `PJSUA.start()` is fail-fast. Every device scenario inherits this. |
+| [`Testing-Playbook.md`](./Testing-Playbook.md) §4 | Ephemeral ports by default (`OFFHOOK_PORT` pins one); 5060 is held by other softphones and `PJSUA.start()` is fail-fast. Every device scenario inherits this. |
 | [`Testing-Playbook.md`](./Testing-Playbook.md) §5 | Live-run etiquette: these are other people's registrars; never probe bad credentials against the loopback pair. Scenario runs are live runs. |
 | [`SIP-Test-Infrastructure.md`](./SIP-Test-Infrastructure.md) §2 | Video and interactive up/downgrade are mapped to `addVideoStream` / `removeVideoStream` / `changeVideoCaptureDevice` against sip2sip `3333` or two clients. The capability→endpoint map is the input to §7's scenario catalogue, not something to redo. |
 | `Tests/EngineHarness.swift` | `startIfNeeded`, `waitForRegistrationResult`, `waitForCallState`, `waitForCallOutcome`, `waitForActiveMedia` — the await vocabulary. §6 extends it; §9 names what it cannot express. |
@@ -154,7 +154,7 @@ xcrun devicectl device process launch --device $D --console \
   --environment-variables '{
     "OFFHOOK_RUN_ID":"v7q4f2a9c1", "OFFHOOK_SCENARIO":"B1-camera-in-use",
     "OFFHOOK_ROLE":"caller", "OFFHOOK_PARAMS":"preset=640x480,camera=front",
-    "OFFHOOK_PORT":"0", "OFFHOOK_REGISTRAR":"…", "OFFHOOK_USERNAME":"…" }' \
+    "OFFHOOK_REGISTRAR":"…", "OFFHOOK_USERNAME":"…" }' \
   io.github.laconicman.offhook
 ```
 

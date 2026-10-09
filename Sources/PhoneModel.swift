@@ -121,9 +121,11 @@ final class PhoneModel: NSObject {
     private let callObserver = CXCallObserver()
     private static let maxLogLines = 200
 
-    /// Overrides the UDP/TCP listening port when `OFFHOOK_PORT` is set; `nil` keeps the IANA
-    /// defaults. Debug-tool hook only — see `init()`.
-    private var transportPort: UInt32?
+    /// The UDP/TCP listening port: ephemeral (`0`) unless `OFFHOOK_PORT` pins one. A client
+    /// registers whatever address it gets, so it needs no fixed port. And on a real device another
+    /// SIP app may hold 5060, where `PJSUA.start()` fails fast (TD-18). It has to be the default
+    /// rather than an opt-in, because iOS gives a push launch no environment.
+    private var transportPort: UInt32 = 0
 
     // MARK: VoIP push (RFC 8599 wake-up)
 
@@ -152,9 +154,7 @@ final class PhoneModel: NSObject {
         if let value = env["OFFHOOK_REGISTRAR"] { registrar = value }
         if let value = env["OFFHOOK_USERNAME"] { username = value }
         if let value = env["OFFHOOK_PASSWORD"] { password = value }
-        // `0` binds ephemeral ports instead of 5060/5061. Needed on a real device, where
-        // another VoIP app may already hold 5060 and `PJSUA.start()` is fail-fast (TD-18),
-        // so one squatted port takes the whole engine down before it ever registers.
+        // Pins the UDP/TCP port, e.g. `5060`; without it the ports are ephemeral (`transportPort`).
         if let value = env["OFFHOOK_PORT"], let port = UInt32(value) { transportPort = port }
         if let value = env["OFFHOOK_DIAL"] { dialTarget = value }
         accounts = accountStore.accounts
@@ -190,17 +190,15 @@ final class PhoneModel: NSObject {
         guard engineState == .idle else { return }
         engineState = .starting
         do {
-            // UDP + TCP (the engine defaults) plus TLS on an ephemeral port. A client-only TLS
+            // UDP + TCP on `transportPort`, plus TLS on an ephemeral port. A client-only TLS
             // transport needs no fixed listening port and no certificate — pjsip sets one only
             // when configured — so this costs nothing when unused and is what lets a registrar
             // URI carry `;transport=tls`. Port 0 rather than 5061 because `start()` is
             // fail-fast: losing a race for the IANA port would take the whole engine down.
             var configuration = PJSUA.Configuration()
-            if let transportPort {
-                configuration.transports = [TransportConfiguration("udp", .udp, port: transportPort),
-                                            TransportConfiguration("tcp", .tcp, port: transportPort)]
-            }
-            configuration.transports.append(TransportConfiguration("tls", .tls, port: 0))
+            configuration.transports = [TransportConfiguration("udp", .udp, port: transportPort),
+                                        TransportConfiguration("tcp", .tcp, port: transportPort),
+                                        TransportConfiguration("tls", .tls, port: 0)]
             // The sink fires on pjsip's log thread; stamp and log there (a busy main actor would
             // misdate queued lines), then hop before mutating observable state.
             configuration.logSink = { [weak self] level, text in

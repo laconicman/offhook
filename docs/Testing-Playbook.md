@@ -101,7 +101,7 @@ xcodebuild build-for-testing -scheme Offhook -destination "platform=iOS,id=$D" \
 xcrun devicectl device install app --device $D \
   ~/Library/Developer/Xcode/DerivedData/Offhook-*/Build/Products/Debug-iphoneos/Offhook.app
 xcrun devicectl device process launch --device $D --console \
-  --environment-variables '{"OFFHOOK_AUTOSMOKE":"1","OFFHOOK_PORT":"0",
+  --environment-variables '{"OFFHOOK_AUTOSMOKE":"1",
     "OFFHOOK_REGISTRAR":"iptel.org;transport=tls","OFFHOOK_USERNAME":"…","OFFHOOK_PASSWORD":"…"}' \
   io.github.laconicman.offhook
 ```
@@ -118,7 +118,7 @@ Four things that will stop you, in the order you will hit them:
 - **`OFFHOOK_REGISTRAR` is a bare host, not a URI.** The app builds `sip:<user>@<registrar>`
   itself, so `sip:iptel.org;transport=tls` yields `sip:offhook@sip:iptel.org` and
   `PJSIP_EINVALIDURI`. Pass `iptel.org;transport=tls`.
-- **`bind() error: Address already in use`** — see §4.
+- **`bind() error: Address already in use`**: only when `OFFHOOK_PORT` pins a port; see §4.
 
 Terminate between runs (`devicectl device process terminate --pid …`); a live app keeps
 re-registering every 60 s.
@@ -148,9 +148,11 @@ non-jailbroken device and the sandbox hides other processes' sockets. The two th
 work are exactly what was done above: enumerate installed apps for SIP clients, and bind-probe
 from your own app to find which ports are free.
 
-**Use `OFFHOOK_PORT=0`** for device runs. Ephemeral ports are correct for a client anyway; a
-fixed 5060 only matters for unsolicited inbound SIP, which a mobile UA gets via push, not by
-squatting the IANA port.
+**So Offhook binds ephemeral UDP/TCP ports by default**, and `OFFHOOK_PORT` only pins one (e.g.
+`5060` to reproduce this). Ephemeral ports are correct for a client anyway; a fixed 5060 only
+matters for unsolicited inbound SIP, which a mobile UA gets via push, not by squatting the IANA
+port. The default can't be an opt-in variable: iOS gives an app it launches for a VoIP push no
+environment (§9).
 
 ## 5. Live-run etiquette
 
@@ -302,7 +304,7 @@ creation) go to stdout only; neither the sink nor pjsua's own log file ever sees
 ```sh
 D=<device-udid>                      # xcrun devicectl list devices
 xcrun devicectl device process launch --device $D --console --terminate-existing \
-  --environment-variables '{"OS_ACTIVITY_DT_MODE":"YES","OFFHOOK_PORT":"0"}' \
+  --environment-variables '{"OS_ACTIVITY_DT_MODE":"YES"}' \
   io.github.laconicman.offhook 2>&1 | tee offhook-console.log
 ```
 
@@ -343,7 +345,8 @@ One file per launch, newest five kept, written line by line, so a run iOS killed
 A whole SIP message is one entry: the level leads its first line and the rest follow as written.
 It is the quickest answer to "what did the engine do on that push". On its first use it showed
 why a cold push launch never registered: `bind() error: Address already in use [status=120048]`.
-A push launch has no `OFFHOOK_PORT=0`, so the engine tried 5060 (§4).
+A push launch has no `OFFHOOK_PORT=0`, so the engine tried 5060 (§4). Fixed since: ports are
+ephemeral by default.
 
 ### After the fact: the app's own lines
 
