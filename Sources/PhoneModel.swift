@@ -132,8 +132,10 @@ final class PhoneModel: NSObject {
     /// The PushKit VoIP token as hex (the Contact's `pn-prid`), once iOS has issued one.
     private(set) var pushToken: String?
     private var pushRegistrar: PushRegistrar?
-    /// What a push-enabled account asks the registrar for. A suspended app refreshes nothing,
-    /// so the binding, and the push target with it, must outlive the suspension.
+    /// What an account asks the registrar for in a build that can register for push. A suspended
+    /// app refreshes nothing, so the binding, and the push target with it, must outlive the
+    /// suspension. Asked for even before a token exists: the expiry is set on add only, and the
+    /// token may arrive after the account is added.
     private static let pushRegistrationTimeout: UInt32 = 3600
 
     override init() {
@@ -302,7 +304,7 @@ final class PhoneModel: NSObject {
                                      username: saved.username,
                                      realm: saved.realm,
                                      push: pushConfiguration,
-                                     registrationTimeout: pushConfiguration == nil ? nil : Self.pushRegistrationTimeout,
+                                     registrationTimeout: Self.teamID == nil ? nil : Self.pushRegistrationTimeout,
                                      isDefault: accountIDs.isEmpty),
                 credentials: credentials)
             // A swipe-delete can win the race while `addAccount` is suspended — if the row
@@ -327,12 +329,27 @@ final class PhoneModel: NSObject {
 
     /// Register every saved account — the softphone-on-launch shape.
     func registerAll() async {
+        await awaitPushToken()
         for saved in accounts where accountIDs[saved.id] == nil {
             await register(saved)
         }
     }
 
     // MARK: VoIP push
+
+    /// In a build that can register for push, wait up to 3 s for PushKit's token, so that the first
+    /// REGISTER carries it. PushKit delivers it about 100 ms after launch, before the engine is up.
+    /// Adding it to a live account later costs an un-REGISTER and a new REGISTER. If the first
+    /// REGISTER is still being challenged at that point, pjsua's orphaned registration can
+    /// re-send it without the push parameters.
+    private func awaitPushToken() async {
+        guard Self.teamID != nil, pushToken == nil else { return }
+        let deadline = ContinuousClock.now + .seconds(3)
+        while pushToken == nil, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        if pushToken == nil { note("no push token after 3 s: registering without one", to: .push) }
+    }
 
     /// RFC 8599 Contact parameters for this build, or `nil` without a token or a team prefix
     /// (an unsigned build). Debug builds get sandbox tokens, so they ask for `apns.dev`, the
@@ -354,9 +371,8 @@ final class PhoneModel: NSObject {
         .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ".")) }
         .flatMap { $0.isEmpty ? nil : $0 }
 
-    /// A new or rotated token re-registers live accounts with it. Accounts added before the
-    /// first token keep pjsua's 300 s expiry until they are added again: the expiry is set on
-    /// add only.
+    /// A new or rotated token re-registers live accounts with it. Their expiry was already the
+    /// push one (`pushRegistrationTimeout`), and `reRegister` keeps it.
     private func pushTokenChanged(_ token: String?) {
         guard token != pushToken else { return }
         pushToken = token
