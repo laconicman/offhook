@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// The single screen of the Phase 0 bring-up app: account fields, the start/register/dial
-/// controls, the current call's state, and a live engine-event log.
+/// The single screen of the Phase 0 bring-up app: account fields, the register/dial controls,
+/// the current call's state, and a live engine-event log. The engine starts on its own.
 ///
 /// `@Bindable` exposes two-way bindings into the injected `@Observable` ``PhoneModel`` for the
 /// text fields; everything else is read-only observable state. View → model only (the view never
@@ -35,13 +35,8 @@ struct RootView: View {
             LabeledContent("Engine", value: model.engineStateText)
             LabeledContent("Registration", value: model.registration)
 
-            HStack {
-                Button("Start engine") { Task { await model.startEngine() } }
-                    .disabled(model.engineState != .idle)
-                Spacer()
-                Button("Save & register") { Task { await model.register() } }
-                    .disabled(!model.canRegister)
-            }
+            Button("Save & register") { Task { await model.register() } }
+                .disabled(!model.canRegister)
         }
 
         if !model.accounts.isEmpty {

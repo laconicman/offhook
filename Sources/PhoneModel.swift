@@ -186,7 +186,18 @@ final class PhoneModel: NSObject {
 
     // MARK: Intents
 
+    /// The engine's one start, shared by every trigger: a scene in the foreground (`OffhookApp`),
+    /// a VoIP push launch (`wakeForPush`) and the auto-smoke. A second caller waits for the first
+    /// rather than returning while the engine is still `.starting`.
+    private var engineStart: Task<Void, Never>?
+
+    /// Start the engine and register the saved accounts, once until `stop()`.
     func startEngine() async {
+        if engineStart == nil { engineStart = Task { [weak self] in await self?.bringUpEngine() } }
+        await engineStart?.value
+    }
+
+    private func bringUpEngine() async {
         guard engineState == .idle else { return }
         engineState = .starting
         do {
@@ -364,7 +375,9 @@ final class PhoneModel: NSObject {
     }
 
     /// After a VoIP push has been reported to CallKit: start the engine if the push launched
-    /// the app; otherwise run an ip_change through the network-change pump. iOS closed the
+    /// the app. A push launch has no scene in the foreground, so nothing else has started it, and
+    /// it starts here with the call already in CallKit and the push token known. Otherwise run an
+    /// ip_change through the network-change pump. iOS closed the
     /// TCP connection while the app was suspended and pjsip never saw it, so a plain
     /// re-REGISTER can wait on the dead socket until its transaction times out (~33 s);
     /// ip_change shuts the transports down and registers over a fresh connection at once.
@@ -474,6 +487,7 @@ final class PhoneModel: NSObject {
         await engine.hangupAll()
         await engine.shutdown()
         engineState = .idle
+        engineStart = nil
     }
 
     // MARK: Network changes → engine

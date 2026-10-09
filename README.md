@@ -40,8 +40,9 @@ so no network fetch.
 
 1. Edit the three account fields (or change the defaults in `PhoneModel`): **Registrar host**,
    **Username**, **Password**, and a **Dial** target that echoes audio back.
-2. **Start engine** → the Engine row should read `running` and the log show `engine started`.
-3. **Register** → watch the Registration row flip to `registered (200)`.
+2. The engine starts when the app comes to the foreground: the Engine row should read `running`
+   and the log show `engine started`. Saved accounts register on their own.
+3. **Save & register** → watch the Registration row flip to `registered (200)`.
 4. **Dial** → the call goes through CallKit and appears in the **Calls** list (label = the
    dialed target): state `dialing… → connected` from `CXCallObserver`; audio starts once
    CallKit activates the session (`didActivate` → engine sound device) — you should **hear

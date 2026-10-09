@@ -20,5 +20,11 @@ struct OffhookApp: App {
         .onChange(of: scenePhase) { _, phase in
             Logger.app.notice("scene \(String(describing: phase), privacy: .public)")
         }
+        // A softphone needs no tap to come up: the engine starts, and the saved accounts register,
+        // once a scene is in the foreground. A VoIP push launch has no such scene; the push starts
+        // the engine itself (`PhoneModel.wakeForPush`), after CallKit has the call.
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            if phase == .active { Task { await model.startEngine() } }
+        }
     }
 }
