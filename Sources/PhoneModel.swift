@@ -397,6 +397,7 @@ final class PhoneModel: NSObject {
     /// TCP connection while the app was suspended and pjsip never saw it, so a plain
     /// re-REGISTER can wait on the dead socket until its transaction times out (~33 s);
     /// ip_change shuts the transports down and registers over a fresh connection at once.
+    /// Experimental: it also tears down a connection that is still alive (Tech-Debt OH-12).
     /// Either way the new registration is what makes the server hand over the INVITE.
     private func wakeForPush() async {
         note("VoIP push — waking the engine (\(engineStateText))", to: .push)

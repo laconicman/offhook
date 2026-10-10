@@ -20,10 +20,15 @@ See the smoke procedure in [README](../README.md) and endpoints in
   [OH-3](./Tech-Debt.md)).
 - **PushKit / hybrid VoIP push** (RFC 8599) — persisted-connection + push with no double ring.
   Wired 2026-10-05 (registry, push parameters, 3600 s expiry, Flexisip payload, wake-up
-  re-REGISTER); verification on a device against a self-hosted Flexisip with our certificate
-  is next ([SIP-Test-Infrastructure](./SIP-Test-Infrastructure.md) §3; Flexisip first, see
-  [Own-SIP-Server](./Own-SIP-Server.md)). Flexisip pushes even when the connection is alive, so
-  the push and the INVITE must merge by Call-ID (the Kit does).
+  re-REGISTER). Verified 2026-10-10 on a device against a self-hosted Flexisip with our
+  certificate ([SIP-Test-Infrastructure](./SIP-Test-Infrastructure.md) §3; Flexisip first, see
+  [Own-SIP-Server](./Own-SIP-Server.md)):
+  - the engine starts with no tap, from a foreground scene or from the push;
+  - a suspended app and a killed one, on a locked phone, both ring, answer and connect.
+
+  Flexisip pushes even when the connection is alive, so the push and the INVITE must merge by
+  Call-ID (the Kit does). A push to a running engine still runs ip_change, live connection or
+  not: [OH-12](./Tech-Debt.md), open and experimental.
 - **A stored instance ID** (`+sip.instance`) before push: a client that reconnects after every
   wake-up is recognisable to the registrar only by it ([Instance-ID](./Instance-ID.md),
   [OH-11](./Tech-Debt.md)).
