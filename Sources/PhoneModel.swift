@@ -358,19 +358,37 @@ final class PhoneModel: NSObject {
     }
 
     /// RFC 8599 Contact parameters for this build, or `nil` without a token or a team prefix
-    /// (an unsigned build). Debug builds get sandbox tokens, so they ask for `apns.dev`, the
-    /// Flexisip provider name for the sandbox endpoint; release builds ask for `apns`.
+    /// (an unsigned build).
     private var pushConfiguration: PushConfiguration? {
         guard let pushToken, let teamID = Self.teamID,
               let bundleID = Bundle.main.bundleIdentifier else { return nil }
-        #if DEBUG
-        let provider = "apns.dev"
-        #else
-        let provider = "apns"
-        #endif
         return PushConfiguration(
-            params: ";pn-provider=\(provider);pn-param=\(teamID).\(bundleID).voip;pn-prid=\(pushToken)")
+            params: ";pn-provider=\(Self.pushProvider);pn-param=\(teamID).\(bundleID).voip;pn-prid=\(pushToken)")
     }
+
+    /// Flexisip's name for the APNs endpoint this build's tokens belong to: `apns.dev` for the
+    /// sandbox, `apns` for production. A token's environment is the signed app's
+    /// `aps-environment`, not the build configuration: a development-signed Release build gets
+    /// sandbox tokens too. Development and ad hoc builds embed their provisioning profile, which
+    /// carries the entitlement; an App Store build embeds none and is production. The Simulator
+    /// embeds none either, and its tokens are sandbox ones.
+    private static let pushProvider: String = {
+        #if targetEnvironment(simulator)
+        return "apns.dev"
+        #else
+        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let profile = try? Data(contentsOf: url),
+              // The profile is a CMS envelope around a plain XML property list.
+              let start = profile.range(of: Data("<?xml".utf8)),
+              let end = profile.range(of: Data("</plist>".utf8), in: start.lowerBound..<profile.endIndex),
+              let plist = try? PropertyListSerialization.propertyList(
+                  from: profile[start.lowerBound..<end.upperBound], format: nil) as? [String: Any],
+              let entitlements = plist["Entitlements"] as? [String: Any],
+              entitlements["aps-environment"] as? String == "development"
+        else { return "apns" }
+        return "apns.dev"
+        #endif
+    }()
 
     /// The team ID, from the signed app's `AppIdentifierPrefix` (`"ABCDE12345."`).
     private static let teamID: String? = (Bundle.main.object(forInfoDictionaryKey: "AppIdentifierPrefix") as? String)
