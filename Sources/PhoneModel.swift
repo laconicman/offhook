@@ -200,7 +200,10 @@ final class PhoneModel: NSObject {
     }
 
     private func bringUpEngine() async {
-        guard engineState == .idle else { return }
+        switch engineState {
+        case .idle, .failed: break
+        case .starting, .running: return
+        }
         engineState = .starting
         do {
             // UDP + TCP on `transportPort`, plus TLS on an ephemeral port. A client-only TLS
@@ -259,6 +262,8 @@ final class PhoneModel: NSObject {
             ipChangeInFlight = false
             pendingPathSignature = nil
             engineState = .failed("\(error)")
+            // The next trigger, a push or a scene coming to the foreground, starts again.
+            engineStart = nil
             note("start failed: \(error)", to: .engine, level: .error)
         }
     }
@@ -415,8 +420,9 @@ final class PhoneModel: NSObject {
     }
 
     /// After a VoIP push has been reported to CallKit: start the engine if the push launched
-    /// the app. A push launch has no scene in the foreground, so nothing else has started it, and
-    /// it starts here with the call already in CallKit and the push token known. Otherwise run an
+    /// the app, or if an earlier start failed. A push launch has no scene in the foreground, so
+    /// nothing else has started it, and it starts here with the call already in CallKit and the
+    /// push token known. Otherwise run an
     /// ip_change through the network-change pump. iOS closed the
     /// TCP connection while the app was suspended and pjsip never saw it, so a plain
     /// re-REGISTER can wait on the dead socket until its transaction times out (~33 s);
@@ -426,12 +432,12 @@ final class PhoneModel: NSObject {
     private func wakeForPush() async {
         note("VoIP push — waking the engine (\(engineStateText))", to: .push)
         switch engineState {
-        case .idle:
+        case .idle, .failed:
             await startEngine()
         case .running:
             pendingPathSignature = "VoIP push wake-up"
             pumpIPChange()
-        case .starting, .failed:
+        case .starting:
             break
         }
     }
