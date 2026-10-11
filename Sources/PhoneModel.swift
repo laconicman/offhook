@@ -306,7 +306,8 @@ final class PhoneModel: NSObject {
                                      push: pushConfiguration,
                                      registrationTimeout: Self.teamID == nil ? nil : Self.pushRegistrationTimeout,
                                      isDefault: accountIDs.isEmpty),
-                credentials: credentials)
+                credentials: credentials,
+                wait: .dispatched)   // the outcome arrives as `.registrationState`
             // A swipe-delete can win the race while `addAccount` is suspended — if the row
             // is gone, take the fresh engine account down with it rather than leaving a
             // live registration with nothing to manage it.
@@ -321,6 +322,11 @@ final class PhoneModel: NSObject {
             outgoingAccountID = saved.id
             accountStates[saved.id] = "registering…"
             note("registering \(saved.aor)…", to: .accounts)
+        } catch RegistrationError.failed(let added, let reason) {
+            // Added, but its first REGISTER could not be sent: take it down again.
+            try? await engine.removeAccount(added)
+            accountStates[saved.id] = "add failed"
+            note("first REGISTER failed: \(reason)", to: .accounts, level: .error)
         } catch {
             accountStates[saved.id] = "add failed"
             note("addAccount failed: \(error)", to: .accounts, level: .error)
@@ -563,7 +569,7 @@ final class PhoneModel: NSObject {
         ipChangeFireTask = Task { [weak self] in
             guard let self else { return }
             do {
-                try await engine.handleIPChange()
+                try await engine.handleIPChange(wait: .dispatched)
                 guard !Task.isCancelled else { return }
                 ipChangeRetryAttempt = 0
                 note("network path → \(signature): ip_change started", to: .engine)

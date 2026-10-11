@@ -201,7 +201,8 @@ actor EngineHarness {
                                  registrar: account.registrar,
                                  username: account.username,
                                  isDefault: slot == 1),
-            credentials: InlineCredentialStore(password: account.password))
+            credentials: InlineCredentialStore(password: account.password),
+            wait: .dispatched)
         let reg = try await waitForRegistrationResult(id)
         guard reg.active else {
             throw XCTSkip("\(account.aor) failed to register (\(reg.statusCode))")
