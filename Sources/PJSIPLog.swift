@@ -22,9 +22,10 @@ enum PJSIPLog {
     /// token in every REGISTER's Contact (`pn-prid`, kept to its first 8 hex digits). Header and
     /// parameter names stay — auth and push debugging read them — the material goes.
     /// Case-insensitive with optional LWS: `RESPONSE = "…"` and `response="…"` are the same header
-    /// to a SIP parser.
+    /// to a SIP parser. The digest `response` is scrubbed unquoted too: RFC 7616 quotes it, but a
+    /// non-conforming peer's line must not reach the log whole.
     private static let scrubbers: [(pattern: String, template: String)] = [
-        (#"(?i)(response\s*=\s*")[^"]*""#, #"$1•••""#),
+        (#"(?i)(\bresponse\s*=\s*)(?:"[^"]*"|[^\s,;"]+)"#, #"$1"•••""#),
         (#"(?i)((?:Proxy-)?Authorization\s*:\s*Basic\s+)\S+"#, #"$1<redacted>"#),
         (#"(?i)(pn-prid\s*=\s*[0-9a-f]{8})[0-9a-f]+"#, #"$1…"#),
     ]
