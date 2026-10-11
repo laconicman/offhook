@@ -188,6 +188,9 @@ final class PhoneModel: NSObject {
 
     // MARK: Intents
 
+    /// Registration results for accounts not yet in `accountIDs`, kept for `register(_:)`.
+    private var unmappedRegistrations: [AccountID: String] = [:]
+
     /// The engine's one start, shared by every trigger: a scene in the foreground (`OffhookApp`),
     /// a VoIP push launch (`wakeForPush`) and the auto-smoke. A second caller waits for the first
     /// rather than returning while the engine is still `.starting`.
@@ -236,6 +239,10 @@ final class PhoneModel: NSObject {
                 let text = active ? "registered (\(code))" : "not registered (\(code))"
                 if let saved = accountIDs.first(where: { $0.value == account })?.key {
                     accountStates[saved] = text
+                } else {
+                    // `register(_:)` maps the account once `addAccount` returns, and a fast
+                    // registrar can answer before that.
+                    unmappedRegistrations[account] = text
                 }
                 registration = text
                 note("reg[\(account)]: active=\(active) code=\(code) expires=\(expiration)s", to: .accounts)
@@ -318,6 +325,7 @@ final class PhoneModel: NSObject {
             // live registration with nothing to manage it.
             guard accounts.contains(where: { $0.id == saved.id }) else {
                 try? await engine.removeAccount(added)
+                unmappedRegistrations[added] = nil
                 return
             }
             accountIDs[saved.id] = added
@@ -325,11 +333,12 @@ final class PhoneModel: NSObject {
             // a real picker arrives with the multi-call UI.
             await callKit.router.setOutgoingAccount(added)
             outgoingAccountID = saved.id
-            accountStates[saved.id] = "registering…"
+            accountStates[saved.id] = unmappedRegistrations.removeValue(forKey: added) ?? "registering…"
             note("registering \(saved.aor)…", to: .accounts)
         } catch RegistrationError.failed(let added, let reason) {
             // Added, but its first REGISTER could not be sent: take it down again.
             try? await engine.removeAccount(added)
+            unmappedRegistrations[added] = nil
             accountStates[saved.id] = "add failed"
             note("first REGISTER failed: \(reason)", to: .accounts, level: .error)
         } catch {
@@ -448,6 +457,7 @@ final class PhoneModel: NSObject {
         if let id = accountIDs[saved.id] {
             try? await engine.removeAccount(id)
             accountIDs[saved.id] = nil
+            unmappedRegistrations[id] = nil
         }
         // If the removed row was the outgoing account, promote a survivor so `dial` doesn't
         // aim the router at a dead engine id.
