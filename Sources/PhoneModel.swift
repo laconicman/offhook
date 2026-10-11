@@ -409,13 +409,21 @@ final class PhoneModel: NSObject {
         .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ".")) }
         .flatMap { $0.isEmpty ? nil : $0 }
 
-    /// A new or rotated token re-registers live accounts with it. Their expiry was already the
-    /// push one (`pushRegistrationTimeout`), and `reRegister` keeps it.
+    /// A new or rotated token re-registers live accounts with it, and an invalidated one is
+    /// withdrawn from them. Their expiry was already the push one (`pushRegistrationTimeout`),
+    /// and `reRegister` keeps it.
     private func pushTokenChanged(_ token: String?) {
         guard token != pushToken else { return }
         pushToken = token
         guard let token else {
-            note("push token invalidated", to: .push)
+            note("push token invalidated: withdrawing it from live registrations", to: .push)
+            guard Self.teamID != nil else { return }
+            // An empty parameter string carries no push parameters, so the engine un-REGISTERs
+            // the binding with the dead token and registers the Contact without them.
+            let withdrawn = PushConfiguration(params: "")
+            for account in accountIDs.values {
+                Task { try? await engine.reRegister(account, updatingPush: withdrawn) }
+            }
             return
         }
         note("push token \(token.prefix(8))…", to: .push)
