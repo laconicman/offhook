@@ -186,8 +186,9 @@ The user sees a running call timer, a "connected" label, and silence.
   case is `SE/2 + ~83 s` ≈ **983 s**, and the **refreshee's is 1768 s (~29.5 min)** — which is the
   *incoming* call case, i.e. the one where the user is most likely to be waiting on a dead line.
   An inbound call that dies is invisible for roughly twice as long as an outbound one.
-- *Related:* ICE keep-alive failure is the stack's only continuous liveness signal and needs
-  [OH-4](#oh-4--no-stunice-configuration--deferred); upstream note:
+- *Related:* ICE does not fill this gap. With [OH-4](#oh-4--no-stunice-configuration--deferred) it
+  would report a TURN-refresh failure and a NAT rebinding, never the peer's silence: its keep-alive to
+  the peer gets no response (swift-pjsua TD-27). The RX counter stays the detector. Upstream note:
   `../../swift-pjsua/Upstream/no-transport-death-notification-for-established-calls.md`.
 
 ### OH-11 — no instance ID of our own · *open*
