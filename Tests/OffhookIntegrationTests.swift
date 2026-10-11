@@ -197,6 +197,7 @@ final class OffhookIntegrationTests: XCTestCase {
     func test05_simultaneousCalls() async throws {
         let (caller, calleeAOR) = try Self.loopbackPair()
         let outboundLegs = 4 // × 2 legs each (we auto-answer the inbound side) = PJSUA_MAX_CALLS
+        let inboundBefore = await harness.answeredIncoming.count
 
         var calls: [CallID] = []
         func hangUpEverything() async {
@@ -261,6 +262,15 @@ final class OffhookIntegrationTests: XCTestCase {
                 XCTAssertEqual(state, .confirmed,
                                "hanging up leg \(index + 1) disturbed a later leg")
             }
+        }
+
+        // Leave the call table as we found it. A caller leg reports disconnected as soon as its
+        // BYE is sent, but the auto-answered callee legs keep their slots until that BYE arrives,
+        // and the next test needs those slots. With swift-pjsip 0.3.0 the caller legs report within
+        // milliseconds, so test06 dialled into a full table (PJ_ETOOMANY); 0.2.1's slower teardown
+        // had been hiding this.
+        for callee in await harness.answeredIncoming.dropFirst(inboundBefore) {
+            try await harness.waitForCallState(callee, .disconnected)
         }
     }
 
