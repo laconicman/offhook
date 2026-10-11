@@ -1,0 +1,6 @@
+<!-- cradle base bar + two horns under the earpieces' resting spots — group "Cradle" (back) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+<path fill="#556275" d="M280 670 h464 a26 26 0 0 1 26 26 a26 26 0 0 1 -26 26 h-464 a26 26 0 0 1 -26 -26 a26 26 0 0 1 26 -26 Z"/>
+<rect x="350" y="628" width="80" height="58" rx="18" fill="#556275"/>
+<rect x="594" y="628" width="80" height="58" rx="18" fill="#556275"/>
+</svg>

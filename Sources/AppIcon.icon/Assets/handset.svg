@@ -1,0 +1,8 @@
+<!-- fat Western-Electric handset: crescent + earpiece bulbs, tilted -18°, lowered 20 — group "Handset" -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+<g fill="#E8A93D" transform="translate(0 20) rotate(-18 512 430)">
+<path d="M308.2 394.1 A207 207 0 0 1 715.8 394.1 A45 45 0 0 1 627.2 409.7 A117 117 0 0 0 396.8 409.7 A45 45 0 0 1 308.2 394.1 Z"/>
+<circle cx="352.5" cy="401.9" r="64"/>
+<circle cx="671.5" cy="401.9" r="64"/>
+</g>
+</svg>
