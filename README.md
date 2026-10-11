@@ -104,8 +104,8 @@ it recovers on its own.
 - **CallKit is wired (2026-07-04)** — `SwiftPJSUAKit`'s `CallKitController` + `CallSessionRouter`
   are the sole `engine.events` consumer; the app requests actions via `CXCallController` and
   observes via `CXCallObserver` (outgoing round trip verified live). **VoIP push is wired**
-  (2026-10-05): a `PKPushRegistry` from launch, RFC 8599 parameters on REGISTER (`apns.dev` in
-  debug builds) with a 3600 s expiry, Flexisip's payload, wake-up re-REGISTER; end-to-end on a
+  (2026-10-05): a `PKPushRegistry` from launch, RFC 8599 parameters on REGISTER (`apns.dev` for
+  development-signed builds, read from the embedded provisioning profile) with a 3600 s expiry, Flexisip's payload, wake-up re-REGISTER; end-to-end on a
   device still needs a server holding our certificate (docs §3). Not here yet: **video rendering**, and a live
   verification of the **incoming**-call UI (needs a second instance — Tech-Debt OH-8).
 - **Scripted smoke:** launch with `OFFHOOK_AUTOSMOKE=1` (+ `OFFHOOK_USERNAME` / `OFFHOOK_PASSWORD`
