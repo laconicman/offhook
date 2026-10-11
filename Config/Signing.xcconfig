@@ -1,0 +1,4 @@
+// Device signing. DEVELOPMENT_TEAM lives in Local.xcconfig, which is git-ignored so the team ID
+// stays out of the repository: copy Local.xcconfig.example to Local.xcconfig and set it there.
+// Simulator builds need neither file.
+#include? "Local.xcconfig"

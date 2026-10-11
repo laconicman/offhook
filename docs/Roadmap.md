@@ -19,9 +19,16 @@ See the smoke procedure in [README](../README.md) and endpoints in
   and the Phase-0 `AudioSession` (discharges [OH-1](./Tech-Debt.md), [OH-2](./Tech-Debt.md),
   [OH-3](./Tech-Debt.md)).
 - **PushKit / hybrid VoIP push** (RFC 8599) — persisted-connection + push with no double ring.
-  End-to-end push needs a self-hosted Flexisip/OpenSIPS with our APNs key
-  ([SIP-Test-Infrastructure](./SIP-Test-Infrastructure.md) §3); Flexisip first, see
-  [Own-SIP-Server](./Own-SIP-Server.md).
+  Wired 2026-10-05 (registry, push parameters, 3600 s expiry, Flexisip payload, wake-up
+  re-REGISTER). Verified 2026-10-10 on a device against a self-hosted Flexisip with our
+  certificate ([SIP-Test-Infrastructure](./SIP-Test-Infrastructure.md) §3; Flexisip first, see
+  [Own-SIP-Server](./Own-SIP-Server.md)):
+  - the engine starts with no tap, from a foreground scene or from the push;
+  - a suspended app and a killed one, on a locked phone, both ring, answer and connect.
+
+  Flexisip pushes even when the connection is alive, so the push and the INVITE must merge by
+  Call-ID (the Kit does). A push to a running engine still runs ip_change, live connection or
+  not: [OH-12](./Tech-Debt.md), open and experimental.
 - **A stored instance ID** (`+sip.instance`) before push: a client that reconnects after every
   wake-up is recognisable to the registrar only by it ([Instance-ID](./Instance-ID.md),
   [OH-11](./Tech-Debt.md)).
@@ -97,15 +104,18 @@ own; none blocks another.
   have a defensible other value and the second is platform-split (CallKit owns the device
   lifecycle on iOS; nothing does on macOS). Engine side:
   `../../TASK-code-swift-pjsua-audio-and-diagnostics.md` §§2/4.
-- **Diagnostics & log export** — two channels, both settings-controlled. `Logger`/OSLog for
-  operational logging (privacy by default; **no** hand-rolled regex redaction — see
-  [Prior-Art](./Prior-Art.md) §1.4), plus an explicitly enabled diagnostic capture that can
-  include pjsip's own log at a chosen level (`pjsua_logging_config.cb`) and be scoped and exported
-  from settings. Off by default, bounded retention.
-  **Unverified, and it decides the design:** whether `OSLogStore` (`.currentProcessIdentifier`)
-  returns `private` values to the process that wrote them, or redacts them on readback. If it
-  redacts, OSLog cannot be the export source and the diagnostic capture must write its own file.
-  Check this before building either half.
+- **Diagnostics & log export**: sharing logs safely, as VoIP apps do.
+  - **Exists (2026-10-05):** `Logger`/OSLog categories for operational logging. In debug builds,
+    also a SIP log file fed through `pjsua_logging_config.cb`, read from the Mac
+    ([Design](./Design.md), "Logging"; [Testing-Playbook](./Testing-Playbook.md) §9).
+  - **Still to build:** an explicitly enabled capture that the user scopes and exports from
+    settings. Off by default, bounded retention, private by default in release builds, and **no**
+    hand-rolled regex redaction as the privacy mechanism ([Prior-Art](./Prior-Art.md) §1.4).
+  - **It needs a store of its own:** on iOS, `OSLogStore` reads only the current process
+    (`.currentProcessIdentifier`), so lines from before a relaunch are out of reach.
+  - **Unverified:** whether that readback returns `private` values to the process that wrote
+    them, or redacts them. The answer decides whether the current process's part can come from
+    OSLog.
 
 ## Later — macOS
 

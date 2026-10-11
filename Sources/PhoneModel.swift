@@ -2,6 +2,7 @@ import CallKit
 import Foundation
 import Network
 import Observation
+import os
 import SwiftPJSUA
 import SwiftPJSUAKit
 
@@ -120,14 +121,34 @@ final class PhoneModel: NSObject {
     private let callObserver = CXCallObserver()
     private static let maxLogLines = 200
 
-    /// Overrides the UDP/TCP listening port when `OFFHOOK_PORT` is set; `nil` keeps the IANA
-    /// defaults. Debug-tool hook only — see `init()`.
-    private var transportPort: UInt32?
+    /// The UDP/TCP listening port: ephemeral (`0`) unless `OFFHOOK_PORT` pins one. A client
+    /// registers whatever address it gets, so it needs no fixed port. And on a real device another
+    /// SIP app may hold 5060, where `PJSUA.start()` fails fast (TD-18). It has to be the default
+    /// rather than an opt-in, because iOS gives a push launch no environment.
+    private var transportPort: UInt32 = 0
+
+    // MARK: VoIP push (RFC 8599 wake-up)
+
+    /// The PushKit VoIP token as hex (the Contact's `pn-prid`), once iOS has issued one.
+    private(set) var pushToken: String?
+    private var pushRegistrar: PushRegistrar?
+    /// What an account asks the registrar for in a build that can register for push. A suspended
+    /// app refreshes nothing, so the binding, and the push target with it, must outlive the
+    /// suspension. Asked for even before a token exists: the expiry is set on add only, and the
+    /// token may arrive after the account is added.
+    private static let pushRegistrationTimeout: UInt32 = 3600
 
     override init() {
         callKit = CallKitController(engine: engine)
         super.init()
+        // Marks each process in the log: a launch with no scene behind it is iOS starting the
+        // app for a VoIP push.
+        note("launch")
         callObserver.setDelegate(self, queue: .main)
+        pushRegistrar = PushRegistrar(
+            handler: VoIPPushHandler(engine: engine, callKit: callKit),
+            tokenChanged: { [weak self] token in self?.pushTokenChanged(token) },
+            callReported: { [weak self] in await self?.wakeForPush() })
         // Debug-tool hooks: prefill the fields from the environment (`simctl launch` with
         // SIMCTL_CHILD_*, or an Xcode scheme), so scripted smokes and the two-sim harness
         // (Tech-Debt OH-8) never need UI typing. Absent variables leave the defaults.
@@ -135,9 +156,7 @@ final class PhoneModel: NSObject {
         if let value = env["OFFHOOK_REGISTRAR"] { registrar = value }
         if let value = env["OFFHOOK_USERNAME"] { username = value }
         if let value = env["OFFHOOK_PASSWORD"] { password = value }
-        // `0` binds ephemeral ports instead of 5060/5061. Needed on a real device, where
-        // another VoIP app may already hold 5060 and `PJSUA.start()` is fail-fast (TD-18),
-        // so one squatted port takes the whole engine down before it ever registers.
+        // Pins the UDP/TCP port, e.g. `5060`; without it the ports are ephemeral (`transportPort`).
         if let value = env["OFFHOOK_PORT"], let port = UInt32(value) { transportPort = port }
         if let value = env["OFFHOOK_DIAL"] { dialTarget = value }
         accounts = accountStore.accounts
@@ -169,27 +188,46 @@ final class PhoneModel: NSObject {
 
     // MARK: Intents
 
+    /// Registration results for accounts not yet in `accountIDs`, kept for `register(_:)`.
+    private var unmappedRegistrations: [AccountID: String] = [:]
+
+    /// The engine's one start, shared by every trigger: a scene in the foreground (`OffhookApp`),
+    /// a VoIP push launch (`wakeForPush`) and the auto-smoke. A second caller waits for the first
+    /// rather than returning while the engine is still `.starting`.
+    private var engineStart: Task<Void, Never>?
+
+    /// Start the engine and register the saved accounts, once until `stop()`.
     func startEngine() async {
-        guard engineState == .idle else { return }
+        if engineStart == nil { engineStart = Task { [weak self] in await self?.bringUpEngine() } }
+        await engineStart?.value
+    }
+
+    private func bringUpEngine() async {
+        switch engineState {
+        case .idle, .failed: break
+        case .starting, .running: return
+        }
         engineState = .starting
         do {
-            // UDP + TCP (the engine defaults) plus TLS on an ephemeral port. A client-only TLS
+            // UDP + TCP on `transportPort`, plus TLS on an ephemeral port. A client-only TLS
             // transport needs no fixed listening port and no certificate — pjsip sets one only
             // when configured — so this costs nothing when unused and is what lets a registrar
             // URI carry `;transport=tls`. Port 0 rather than 5061 because `start()` is
             // fail-fast: losing a race for the IANA port would take the whole engine down.
             var configuration = PJSUA.Configuration()
-            if let transportPort {
-                configuration.transports = [TransportConfiguration("udp", .udp, port: transportPort),
-                                            TransportConfiguration("tcp", .tcp, port: transportPort)]
-            }
-            configuration.transports.append(TransportConfiguration("tls", .tls, port: 0))
-            // The sink fires on pjsip's log thread; stamp there (a busy main actor would
+            configuration.transports = [TransportConfiguration("udp", .udp, port: transportPort),
+                                        TransportConfiguration("tcp", .tcp, port: transportPort),
+                                        TransportConfiguration("tls", .tls, port: 0)]
+            // The sink fires on pjsip's log thread; stamp and log there (a busy main actor would
             // misdate queued lines), then hop before mutating observable state.
             configuration.logSink = { [weak self] level, text in
                 let timestamp = Date()
-                Task { @MainActor in self?.recordSIPLog(level: level, text: text, timestamp: timestamp) }
+                let line = PJSIPLog.record(level: level, text: text)
+                Task { @MainActor in self?.recordSIPLog(level: level, text: line, timestamp: timestamp) }
             }
+            // The sink already puts every line in the unified log, which Xcode and
+            // `devicectl --console` show; pjsip's own stdout copy would print each one twice.
+            configuration.logLevel = 0
             // The monitor precedes `start()` so a handoff racing engine bind is still
             // observed — it parks in `pendingPathSignature` and fires once `.running`.
             startPathMonitor()
@@ -201,9 +239,13 @@ final class PhoneModel: NSObject {
                 let text = active ? "registered (\(code))" : "not registered (\(code))"
                 if let saved = accountIDs.first(where: { $0.value == account })?.key {
                     accountStates[saved] = text
+                } else {
+                    // `register(_:)` maps the account once `addAccount` returns, and a fast
+                    // registrar can answer before that.
+                    unmappedRegistrations[account] = text
                 }
                 registration = text
-                note("reg[\(account)]: active=\(active) code=\(code) expires=\(expiration)s")
+                note("reg[\(account)]: active=\(active) code=\(code) expires=\(expiration)s", to: .accounts)
             }
             // Event tap: the router's single app-facing relay of every event it processes —
             // structured rows for Diagnostics (C1), plus the one-line log entry.
@@ -211,7 +253,7 @@ final class PhoneModel: NSObject {
                 self?.recordEvent(event)
             }
             engineState = .running
-            note("engine started — CallKit routing active")
+            note("engine started — CallKit routing active", to: .engine)
             pumpIPChange()   // drains a handoff that arrived during .starting
             // Softphone-on-launch: saved accounts come up on their own.
             await registerAll()
@@ -227,14 +269,16 @@ final class PhoneModel: NSObject {
             ipChangeInFlight = false
             pendingPathSignature = nil
             engineState = .failed("\(error)")
-            note("start failed: \(error)")
+            // The next trigger, a push or a scene coming to the foreground, starts again.
+            engineStart = nil
+            note("start failed: \(error)", to: .engine, level: .error)
         }
     }
 
     /// Save the typed-in account (record → JSON, secret → Keychain) and register it.
     /// A failed registration still leaves the account saved — that's the point of a store.
     func register() async {
-        guard engineState == .running else { note("start the engine first"); return }
+        guard engineState == .running else { note("start the engine first", to: .accounts); return }
         // Strip the sip: scheme if the user typed one — the AOR would otherwise come out
         // as sip:alice@sip:host, which no server can parse.
         var host = registrar.split(separator: ";").first.map(String.init) ?? registrar
@@ -248,7 +292,7 @@ final class PhoneModel: NSObject {
             try accountStore.save(draft)
             accounts = accountStore.accounts
         } catch {
-            note("save failed: \(error)")
+            note("save failed: \(error)", to: .accounts, level: .error)
             return
         }
         // Register the canonical stored row: `save` preserves the existing UUID on an AOR
@@ -260,9 +304,9 @@ final class PhoneModel: NSObject {
     /// Register one saved account — the engine fetches the secret from the Keychain itself,
     /// through the `CredentialStore` seam (the app never handles it on this path).
     func register(_ saved: SavedAccount) async {
-        guard engineState == .running else { note("start the engine first"); return }
+        guard engineState == .running else { note("start the engine first", to: .accounts); return }
         guard accountIDs[saved.id] == nil else {
-            note("\(saved.aor) is already registered")
+            note("\(saved.aor) is already registered", to: .accounts)
             return
         }
         do {
@@ -271,32 +315,147 @@ final class PhoneModel: NSObject {
                                      registrar: saved.registrar,
                                      username: saved.username,
                                      realm: saved.realm,
+                                     push: pushConfiguration,
+                                     registrationTimeout: Self.teamID == nil ? nil : Self.pushRegistrationTimeout,
                                      isDefault: accountIDs.isEmpty),
-                credentials: credentials)
+                credentials: credentials,
+                wait: .dispatched)   // the outcome arrives as `.registrationState`
             // A swipe-delete can win the race while `addAccount` is suspended — if the row
             // is gone, take the fresh engine account down with it rather than leaving a
             // live registration with nothing to manage it.
             guard accounts.contains(where: { $0.id == saved.id }) else {
                 try? await engine.removeAccount(added)
+                unmappedRegistrations[added] = nil
                 return
             }
+            // Mapped and shown in one step: once mapped, the observer writes the row itself,
+            // and a result it writes during the await below must not be overwritten.
             accountIDs[saved.id] = added
+            accountStates[saved.id] = unmappedRegistrations.removeValue(forKey: added) ?? "registering…"
             // The most recently registered account becomes the outgoing leg's account —
             // a real picker arrives with the multi-call UI.
             await callKit.router.setOutgoingAccount(added)
             outgoingAccountID = saved.id
-            accountStates[saved.id] = "registering…"
-            note("registering \(saved.aor)…")
+            note("registering \(saved.aor)…", to: .accounts)
+        } catch RegistrationError.failed(let added, let reason) {
+            // Added, but its first REGISTER could not be sent: take it down again.
+            try? await engine.removeAccount(added)
+            unmappedRegistrations[added] = nil
+            accountStates[saved.id] = "add failed"
+            note("first REGISTER failed: \(reason)", to: .accounts, level: .error)
         } catch {
             accountStates[saved.id] = "add failed"
-            note("addAccount failed: \(error)")
+            note("addAccount failed: \(error)", to: .accounts, level: .error)
         }
     }
 
     /// Register every saved account — the softphone-on-launch shape.
     func registerAll() async {
+        await awaitPushToken()
         for saved in accounts where accountIDs[saved.id] == nil {
             await register(saved)
+        }
+    }
+
+    // MARK: VoIP push
+
+    /// In a build that can register for push, wait up to 3 s for PushKit's token, so that the first
+    /// REGISTER carries it. PushKit delivers it about 100 ms after launch, before the engine is up.
+    /// Adding it to a live account later costs an un-REGISTER and a new REGISTER.
+    private func awaitPushToken() async {
+        guard Self.teamID != nil, pushToken == nil else { return }
+        let deadline = ContinuousClock.now + .seconds(3)
+        while pushToken == nil, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        if pushToken == nil { note("no push token after 3 s: registering without one", to: .push) }
+    }
+
+    /// RFC 8599 Contact parameters for this build, or `nil` without a token or a team prefix
+    /// (an unsigned build).
+    private var pushConfiguration: PushConfiguration? {
+        guard let pushToken, let teamID = Self.teamID,
+              let bundleID = Bundle.main.bundleIdentifier else { return nil }
+        return PushConfiguration(
+            params: ";pn-provider=\(Self.pushProvider);pn-param=\(teamID).\(bundleID).voip;pn-prid=\(pushToken)")
+    }
+
+    /// Flexisip's name for the APNs endpoint this build's tokens belong to: `apns.dev` for the
+    /// sandbox, `apns` for production. A token's environment is the signed app's
+    /// `aps-environment`, not the build configuration: a development-signed Release build gets
+    /// sandbox tokens too. Development and ad hoc builds embed their provisioning profile, which
+    /// carries the entitlement; an App Store build embeds none and is production. The Simulator
+    /// embeds none either, and its tokens are sandbox ones.
+    private static let pushProvider: String = {
+        #if targetEnvironment(simulator)
+        return "apns.dev"
+        #else
+        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let profile = try? Data(contentsOf: url),
+              // The profile is a CMS envelope around a plain XML property list.
+              let start = profile.range(of: Data("<?xml".utf8)),
+              let end = profile.range(of: Data("</plist>".utf8), in: start.lowerBound..<profile.endIndex),
+              let plist = try? PropertyListSerialization.propertyList(
+                  from: profile[start.lowerBound..<end.upperBound], format: nil) as? [String: Any],
+              let entitlements = plist["Entitlements"] as? [String: Any],
+              entitlements["aps-environment"] as? String == "development"
+        else { return "apns" }
+        return "apns.dev"
+        #endif
+    }()
+
+    /// The team ID, from the signed app's `AppIdentifierPrefix` (`"ABCDE12345."`).
+    private static let teamID: String? = (Bundle.main.object(forInfoDictionaryKey: "AppIdentifierPrefix") as? String)
+        .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ".")) }
+        .flatMap { $0.isEmpty ? nil : $0 }
+
+    /// A new or rotated token re-registers live accounts with it, and an invalidated one is
+    /// withdrawn from them. Their expiry was already the push one (`pushRegistrationTimeout`),
+    /// and `reRegister` keeps it.
+    private func pushTokenChanged(_ token: String?) {
+        guard token != pushToken else { return }
+        pushToken = token
+        guard let token else {
+            note("push token invalidated: withdrawing it from live registrations", to: .push)
+            guard Self.teamID != nil else { return }
+            // An empty parameter string carries no push parameters, so the engine un-REGISTERs
+            // the binding with the dead token and registers the Contact without them.
+            let withdrawn = PushConfiguration(params: "")
+            for account in accountIDs.values {
+                Task { try? await engine.reRegister(account, updatingPush: withdrawn) }
+            }
+            return
+        }
+        note("push token \(token.prefix(8))…", to: .push)
+        guard let push = pushConfiguration else {
+            note("no team prefix in this build: REGISTER carries no push parameters", to: .push)
+            return
+        }
+        for account in accountIDs.values {
+            Task { try? await engine.reRegister(account, updatingPush: push) }
+        }
+    }
+
+    /// After a VoIP push has been reported to CallKit: start the engine if the push launched
+    /// the app, or if an earlier start failed. A push launch has no scene in the foreground, so
+    /// nothing else has started it, and it starts here with the call already in CallKit and the
+    /// push token known. Otherwise run an
+    /// ip_change through the network-change pump. iOS closed the
+    /// TCP connection while the app was suspended and pjsip never saw it, so a plain
+    /// re-REGISTER can wait on the dead socket until its transaction times out (~33 s);
+    /// ip_change shuts the transports down and registers over a fresh connection at once.
+    /// Experimental: it also tears down a connection that is still alive (Tech-Debt OH-12).
+    /// Either way the new registration is what makes the server hand over the INVITE.
+    private func wakeForPush() async {
+        note("VoIP push — waking the engine (\(engineStateText))", to: .push)
+        switch engineState {
+        case .idle, .failed:
+            await startEngine()
+        case .running:
+            pendingPathSignature = "VoIP push wake-up"
+            pumpIPChange()
+        case .starting:
+            break
         }
     }
 
@@ -306,6 +465,7 @@ final class PhoneModel: NSObject {
         if let id = accountIDs[saved.id] {
             try? await engine.removeAccount(id)
             accountIDs[saved.id] = nil
+            unmappedRegistrations[id] = nil
         }
         // If the removed row was the outgoing account, promote a survivor so `dial` doesn't
         // aim the router at a dead engine id.
@@ -321,13 +481,13 @@ final class PhoneModel: NSObject {
         try? accountStore.remove(saved)
         accounts = accountStore.accounts
         accountStates[saved.id] = nil
-        note("removed \(saved.aor)")
+        note("removed \(saved.aor)", to: .accounts)
     }
 
     /// Request an outgoing call **through CallKit** (`CXStartCallAction`); the provider delegate
     /// forwards it to the router, which drives `engine.makeCall` and fulfills on `.confirmed`.
     func dial() async {
-        guard !accountIDs.isEmpty else { note("register first"); return }
+        guard !accountIDs.isEmpty else { note("register first", to: .calls); return }
         let uuid = UUID()
         // Snapshot before the await: the field is user-editable and a mid-request edit
         // would otherwise mislabel the row with the *new* target.
@@ -343,11 +503,11 @@ final class PhoneModel: NSObject {
             // No optimistic row: the observer can report the call ending *before* this
             // transaction returns, and a "requested" insert would resurrect it. CallKit
             // reports our own call to the observer either way — trust the single source.
-            note("CXStartCallAction requested → \(target)")
+            note("CXStartCallAction requested → \(target)", to: .calls)
         } catch {
             outgoingUUIDs.remove(uuid)
             handlesByUUID.removeValue(forKey: uuid)
-            note("start-call request failed: \(error)")
+            note("start-call request failed: \(error)", to: .calls, level: .error)
         }
     }
 
@@ -356,7 +516,7 @@ final class PhoneModel: NSObject {
         do {
             try await callController.requestTransaction(with: [CXEndCallAction(call: uuid)])
         } catch {
-            note("end-call request failed: \(error)")
+            note("end-call request failed: \(error)", to: .calls, level: .error)
         }
     }
 
@@ -367,7 +527,7 @@ final class PhoneModel: NSObject {
             try await callController.requestTransaction(
                 with: [CXSetHeldCallAction(call: uuid, onHold: onHold)])
         } catch {
-            note("hold request failed: \(error)")
+            note("hold request failed: \(error)", to: .calls, level: .error)
         }
     }
 
@@ -392,6 +552,7 @@ final class PhoneModel: NSObject {
         await engine.hangupAll()
         await engine.shutdown()
         engineState = .idle
+        engineStart = nil
     }
 
     // MARK: Network changes → engine
@@ -450,16 +611,16 @@ final class PhoneModel: NSObject {
         ipChangeFireTask = Task { [weak self] in
             guard let self else { return }
             do {
-                try await engine.handleIPChange()
+                try await engine.handleIPChange(wait: .dispatched)
                 guard !Task.isCancelled else { return }
                 ipChangeRetryAttempt = 0
-                note("network path → \(signature): ip_change started")
+                note("network path → \(signature): ip_change started", to: .engine)
             } catch {
                 guard !Task.isCancelled else { return }
                 // Never started — no `.completed` will arrive to release in-flight.
                 ipChangeInFlight = false
                 pendingPathSignature = signature
-                note("network path → \(signature): ip_change failed: \(error)")
+                note("network path → \(signature): ip_change failed: \(error)", to: .engine, level: .error)
                 scheduleIPChangeRetry()
             }
         }
@@ -470,7 +631,7 @@ final class PhoneModel: NSObject {
     private func scheduleIPChangeRetry() {
         ipChangeRetryAttempt += 1
         guard ipChangeRetryAttempt <= 5 else {
-            note("ip_change: giving up after \(ipChangeRetryAttempt) failed starts")
+            note("ip_change: giving up after \(ipChangeRetryAttempt) failed starts", to: .engine, level: .error)
             return
         }
         let delay = ipChangeRetryAttempt * 5
@@ -515,15 +676,26 @@ final class PhoneModel: NSObject {
     }
 
     // MARK: Log
-    private func note(_ text: String) {
+
+    /// One line to the on-screen log and the unified log. Debug builds log it public, so a
+    /// collected log reads whole on the Mac (docs/Design.md, "Logging"); release builds leave it
+    /// private. Either way the text must never carry a secret: no password, no credential, and
+    /// the push token only as its prefix.
+    private func note(_ text: String, to logger: Logger = .app, level: OSLogType = .default) {
+        #if DEBUG
+        logger.log(level: level, "\(text, privacy: .public)")
+        #else
+        logger.log(level: level, "\(text)")
+        #endif
         log.append(LogEntry(text: text))
         if log.count > Self.maxLogLines { log.removeFirst(log.count - Self.maxLogLines) }
     }
 
     private static let maxSIPLogRows = 1000
 
+    /// `text` arrives scrubbed of credentials (``PJSIPLog``).
     private func recordSIPLog(level: Int32, text: String, timestamp: Date) {
-        sipLog.append(SIPLogRow(timestamp: timestamp, level: level, text: Self.redactAuth(text)))
+        sipLog.append(SIPLogRow(timestamp: timestamp, level: level, text: text))
         while sipLog.count > Self.maxSIPLogRows {
             // Evict the oldest *chatty* line first — a level-5 flood must not push the
             // level-1 error you opened the view for out of the buffer before the filter
@@ -533,21 +705,6 @@ final class PhoneModel: NSObject {
             } else {
                 sipLog.removeFirst()
             }
-        }
-    }
-
-    /// SIP logs carry credentials — digest `response` values and Basic payloads — and this
-    /// buffer feeds a copyable UI. Header/param names stay (they're what auth debugging
-    /// needs); the credential material is blanked. Case-insensitive with optional LWS:
-    /// `RESPONSE = "…"` and `response="…"` are the same header to a SIP parser.
-    private static let authRedactors: [(pattern: String, template: String)] = [
-        (#"(?i)(response\s*=\s*")[^"]*""#, #"\1•••"#),
-        (#"(?i)((?:Proxy-)?Authorization\s*:\s*Basic\s+)\S+"#, #"\1<redacted>"#),
-    ]
-
-    private static func redactAuth(_ line: String) -> String {
-        authRedactors.reduce(line) {
-            $0.replacingOccurrences(of: $1.pattern, with: $1.template, options: .regularExpression)
         }
     }
 
@@ -572,7 +729,7 @@ final class PhoneModel: NSObject {
         default:
             break
         }
-        note("evt: \(event.diagnosticSummary)")
+        note("evt: \(event.diagnosticSummary)", to: .engine)
     }
 }
 
@@ -585,7 +742,7 @@ extension PhoneModel: CXCallObserverDelegate {
         MainActor.assumeIsolated {
             let uuid = call.uuid
             if call.hasEnded {
-                note("call \(uuid.uuidString.prefix(8)) ended")
+                note("call \(uuid.uuidString.prefix(8)) ended", to: .calls)
                 calls.removeAll { $0.id == uuid }
                 outgoingUUIDs.remove(uuid)
                 handlesByUUID.removeValue(forKey: uuid)
@@ -608,14 +765,14 @@ extension PhoneModel: CXCallObserverDelegate {
                         self.checkedOurs.insert(uuid)
                         self.upsertCall(CallSnapshot(id: uuid, state: state,
                                                      isOnHold: call.isOnHold))
-                        self.note("call \(uuid.uuidString.prefix(8)): \(state)")
+                        self.note("call \(uuid.uuidString.prefix(8)): \(state)", to: .calls)
                     }
                 }
                 return
             }
             upsertCall(CallSnapshot(id: uuid, state: state, isOnHold: call.isOnHold,
                                     handle: handlesByUUID[uuid]))
-            note("call \(uuid.uuidString.prefix(8)): \(state)")
+            note("call \(uuid.uuidString.prefix(8)): \(state)", to: .calls)
         }
     }
 

@@ -27,11 +27,12 @@ xcodegen generate          # writes Offhook.xcodeproj from project.yml
 open Offhook.xcodeproj
 ```
 
-Build & run on an iOS 17 Simulator (Audio works in the Simulator; for a device, set your signing
-team in the target). `project.yml` pins `swift-pjsip` to the **local** checkout (`../swift-pjsip`),
+Build & run on an iOS 17 Simulator (Audio works in the Simulator). For a device, copy
+`Config/Local.xcconfig.example` to `Config/Local.xcconfig` (git-ignored) and put your team ID in
+it; the push entitlement needs a real team. `project.yml` pins `swift-pjsip` to the **local** checkout (`../swift-pjsip`),
 so no network fetch.
 
-> No XcodeGen? Create an iOS App target manually (iOS 17, bundle id `com.laconicman.offhook`),
+> No XcodeGen? Create an iOS App target manually (iOS 17, bundle id `io.github.laconicman.offhook`),
 > add the `Sources/` files, set `INFOPLIST_FILE = Sources/Info.plist`, and add the local
 > `../swift-pjsua` package → product **SwiftPJSUA**.
 
@@ -39,8 +40,9 @@ so no network fetch.
 
 1. Edit the three account fields (or change the defaults in `PhoneModel`): **Registrar host**,
    **Username**, **Password**, and a **Dial** target that echoes audio back.
-2. **Start engine** → the Engine row should read `running` and the log show `engine started`.
-3. **Register** → watch the Registration row flip to `registered (200)`.
+2. The engine starts when the app comes to the foreground: the Engine row should read `running`
+   and the log show `engine started`. Saved accounts register on their own.
+3. **Save & register** → watch the Registration row flip to `registered (200)`.
 4. **Dial** → the call goes through CallKit and appears in the **Calls** list (label = the
    dialed target): state `dialing… → connected` from `CXCallObserver`; audio starts once
    CallKit activates the session (`didActivate` → engine sound device) — you should **hear
@@ -101,12 +103,14 @@ it recovers on its own.
 
 - **CallKit is wired (2026-07-04)** — `SwiftPJSUAKit`'s `CallKitController` + `CallSessionRouter`
   are the sole `engine.events` consumer; the app requests actions via `CXCallController` and
-  observes via `CXCallObserver` (outgoing round trip verified live). Not here yet: **PushKit /
-  VoIP push** (needs self-hosted push infra — docs §3), **video rendering**, and a live
+  observes via `CXCallObserver` (outgoing round trip verified live). **VoIP push is wired**
+  (2026-10-05): a `PKPushRegistry` from launch, RFC 8599 parameters on REGISTER (`apns.dev` for
+  development-signed builds, read from the embedded provisioning profile) with a 3600 s expiry, Flexisip's payload, wake-up re-REGISTER; end-to-end on a
+  device still needs a server holding our certificate (docs §3). Not here yet: **video rendering**, and a live
   verification of the **incoming**-call UI (needs a second instance — Tech-Debt OH-8).
 - **Scripted smoke:** launch with `OFFHOOK_AUTOSMOKE=1` (+ `OFFHOOK_USERNAME` / `OFFHOOK_PASSWORD`
   / `OFFHOOK_REGISTRAR` / `OFFHOOK_DIAL`) to prefill and run start → register → dial with no
-  taps — e.g. `SIMCTL_CHILD_OFFHOOK_AUTOSMOKE=1 … xcrun simctl launch <sim> com.laconicman.offhook`.
+  taps — e.g. `SIMCTL_CHILD_OFFHOOK_AUTOSMOKE=1 … xcrun simctl launch <sim> io.github.laconicman.offhook`.
 - The app and the test suite **can't run on one simulator at the same time** — both bind SIP
   port 5060 (the second engine start fails with "Address already in use"). Terminate one first.
 

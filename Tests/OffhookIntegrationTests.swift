@@ -54,7 +54,8 @@ final class OffhookIntegrationTests: XCTestCase {
                                  registrar: account.registrar,
                                  username: probeUser,
                                  isDefault: false),
-            credentials: InlineCredentialStore(password: "wrong-\(UUID().uuidString.prefix(8))"))
+            credentials: InlineCredentialStore(password: "wrong-\(UUID().uuidString.prefix(8))"),
+            wait: .dispatched)
         let reg: EngineHarness.Registration
         do {
             reg = try await harness.waitForRegistrationResult(bad)
@@ -103,7 +104,8 @@ final class OffhookIntegrationTests: XCTestCase {
                                          registrar: account.registrar,
                                          username: account.username,
                                          isDefault: slot == 1),
-                    credentials: InlineCredentialStore(password: account.password))
+                    credentials: InlineCredentialStore(password: account.password),
+                    wait: .dispatched)
                 await harness.adoptAccount(id, forSlot: slot)
             }
             let reg: EngineHarness.Registration
@@ -419,7 +421,8 @@ final class OffhookIntegrationTests: XCTestCase {
                                  registrar: registrar,
                                  username: account.username,
                                  isDefault: false),
-            credentials: InlineCredentialStore(password: account.password))
+            credentials: InlineCredentialStore(password: account.password),
+            wait: .dispatched)
 
         let reg: EngineHarness.Registration
         do {

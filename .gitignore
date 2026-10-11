@@ -16,3 +16,6 @@ build/
 *.env
 Secrets/
 secrets/
+
+# Per-developer signing (Config/Signing.xcconfig includes it when present).
+Config/Local.xcconfig

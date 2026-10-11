@@ -15,7 +15,7 @@ struct KeychainCredentialStore: CredentialStore {
     var keychain: Keychain = .default
 
     /// `kSecAttrService` namespace, so SIP secrets can't collide with other app secrets.
-    var service: String = "com.laconicman.offhook.sip"
+    var service: String = "io.github.laconicman.offhook.sip"
 
     /// The engine's fetch — synchronous Keychain read inside an `async` witness (D-CRED-4:
     /// the absence of a suspension point inside is the safety property).

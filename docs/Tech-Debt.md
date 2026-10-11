@@ -186,8 +186,9 @@ The user sees a running call timer, a "connected" label, and silence.
   case is `SE/2 + ~83 s` ≈ **983 s**, and the **refreshee's is 1768 s (~29.5 min)** — which is the
   *incoming* call case, i.e. the one where the user is most likely to be waiting on a dead line.
   An inbound call that dies is invisible for roughly twice as long as an outbound one.
-- *Related:* ICE keep-alive failure is the stack's only continuous liveness signal and needs
-  [OH-4](#oh-4--no-stunice-configuration--deferred); upstream note:
+- *Related:* ICE does not fill this gap. With [OH-4](#oh-4--no-stunice-configuration--deferred) it
+  would report a TURN-refresh failure and a NAT rebinding, never the peer's silence: its keep-alive to
+  the peer gets no response (swift-pjsua TD-27). The RX counter stays the detector. Upstream note:
   `../../swift-pjsua/Upstream/no-transport-death-notification-for-established-calls.md`.
 
 ### OH-11 — no instance ID of our own · *open*
@@ -200,6 +201,49 @@ is what a registrar sees, and only while SIP outbound is offered.
   never confirms outbound loses the ID on the first refresh.
 - **Discharge.** [Instance-ID](./Instance-ID.md): an app-supplied, stored instance ID exposed
   through the engine's account config. Wanted before push ([Roadmap](./Roadmap.md): Next).
+
+### OH-12 — a push to a running engine always runs ip_change · *open, experimental*
+
+When a VoIP push finds the engine `.running`, `PhoneModel.wakeForPush` calls
+`pjsua_handle_ip_change()`. That is right for a push to a suspended app. iOS closed the TCP
+connection and pjsip never saw it, so a plain re-REGISTER would wait on the dead socket until its
+transaction times out (~33 s). It is wrong when the connection is alive. Flexisip pushes even then,
+and it sends the INVITE over that connection at the same moment. ip_change shuts down every TCP/TLS
+transport, the live one included.
+
+- **Cost.** At best, an extra connection and REGISTER. At worst, the INVITE in flight is lost. An
+  early incoming dialog survives at the SIP layer but loses its connection, so whether the answer
+  gets through depends on the proxy re-routing it. pjsua has no API that tells a fresh transport
+  from a stale one: DeepWiki on pjproject,
+  [wake-up thread](https://deepwiki.com/search/answer-from-source-on-current_e108ce1e-873d-4b08-adef-6b6e06b9ba4e?mode=deep).
+- **A cold start is not affected.** A push launch has no scene in the foreground, and `OffhookApp`
+  starts the engine only for such a scene. So the push starts the engine itself, and always finds
+  it `.idle`.
+- **Still affected:** a push while the app is in the foreground, or soon after it registered,
+  while the connection is alive.
+- **Discharge: open.** Experimental ideas, each to be checked and tested on a device:
+  - **Refresh anyway.** pjsip cannot spot a stale connection, so always forcing a fresh one may
+    be the robust choice: the call is then answered on a fresh stack. Measure what Flexisip does
+    with the INVITE it already sent.
+  - **Skip when the engine already holds the pushed call.** The Kit derives the CallKit UUID from
+    the Call-ID for both the push and the INVITE. A registry entry with a `CallID` bound therefore
+    means the INVITE already arrived over a live connection, and the push has nothing to wake. The
+    CallKit side may still need closing, e.g. updating the reported call. This needs a Kit query:
+    the router's `isKnownCall` can't tell a push-only entry from one with an engine call.
+  - **A registration coordinator**, as one production softphone runs:
+    - single-flight REGISTER;
+    - a bounded coalescing window, which push and network change bypass;
+    - "call already active over the persistent connection → skip the re-register";
+    - a renew, not a full reconfigure, on push (a full reconfigure per push broke a B2BUA SBC there).
+  - **A time window after the engine starts** (skip ip_change within ~10 s). Considered and
+    dropped once the cold start stopped needing it: it would only cover a push soon after a
+    foreground start.
+- **How to test.** Three cases:
+  - a push to an app in the foreground with a live connection;
+  - a push within seconds of a foreground start;
+  - a push to a suspended app after iOS has closed the socket (the case ip_change is there for).
+
+  Read `waking the engine (…)` and the SIP file ([Testing-Playbook](./Testing-Playbook.md) §9).
 
 ## See Also
 
