@@ -328,12 +328,14 @@ final class PhoneModel: NSObject {
                 unmappedRegistrations[added] = nil
                 return
             }
+            // Mapped and shown in one step: once mapped, the observer writes the row itself,
+            // and a result it writes during the await below must not be overwritten.
             accountIDs[saved.id] = added
+            accountStates[saved.id] = unmappedRegistrations.removeValue(forKey: added) ?? "registering…"
             // The most recently registered account becomes the outgoing leg's account —
             // a real picker arrives with the multi-call UI.
             await callKit.router.setOutgoingAccount(added)
             outgoingAccountID = saved.id
-            accountStates[saved.id] = unmappedRegistrations.removeValue(forKey: added) ?? "registering…"
             note("registering \(saved.aor)…", to: .accounts)
         } catch RegistrationError.failed(let added, let reason) {
             // Added, but its first REGISTER could not be sent: take it down again.
