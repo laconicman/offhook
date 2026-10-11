@@ -144,6 +144,9 @@ actor EngineHarness {
 
         case let .callReplaced(call, newCall):
             replacedCalls.append((old: call, new: newCall))
+
+        case .ipChangeProgress:
+            break   // no test drives an IP change through the harness
         }
     }
 
