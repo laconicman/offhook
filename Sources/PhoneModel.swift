@@ -359,9 +359,7 @@ final class PhoneModel: NSObject {
 
     /// In a build that can register for push, wait up to 3 s for PushKit's token, so that the first
     /// REGISTER carries it. PushKit delivers it about 100 ms after launch, before the engine is up.
-    /// Adding it to a live account later costs an un-REGISTER and a new REGISTER. If the first
-    /// REGISTER is still being challenged at that point, pjsua's orphaned registration can
-    /// re-send it without the push parameters.
+    /// Adding it to a live account later costs an un-REGISTER and a new REGISTER.
     private func awaitPushToken() async {
         guard Self.teamID != nil, pushToken == nil else { return }
         let deadline = ContinuousClock.now + .seconds(3)
