@@ -127,6 +127,9 @@ The user sees a running call timer, a "connected" label, and silence.
   *Engine:* `swift-pjsua` [TD-27](../../swift-pjsua/docs/Tech-Debt.md) — install
   `on_call_media_event`, `on_transport_state`, `on_call_media_transport_state` /
   `on_ice_transport_error`, so the app gets the fast signals too instead of waiting on a poll.
+  Installed: `on_call_media_event` (2026-08-18) and `on_transport_state` (2026-10-12, as
+  `.transportState`, which names the accounts registered over a dead connection). The app does not
+  act on either yet; the ICE pair waits for OH-4.
 - **Confirmed live, 2026-08-18 — the premise holds, and this is no longer speculative.** A
   CONFIRMED call over a blackholed TCP transport sat for **938 s (15 min 38 s)** with **zero**
   callbacks before the session timer eventually killed it. `rx.packets` went flat within 2 s of
@@ -216,6 +219,8 @@ transport, the live one included.
   gets through depends on the proxy re-routing it. pjsua has no API that tells a fresh transport
   from a stale one: DeepWiki on pjproject,
   [wake-up thread](https://deepwiki.com/search/answer-from-source-on-current_e108ce1e-873d-4b08-adef-6b6e06b9ba4e?mode=deep).
+  `swift-pjsua` can since 2026-10-12, from callbacks: `.transportState` reports each connection
+  coming up, and `registrationTransport(of:)` names the account's (TD-31).
 - **A cold start is not affected.** A push launch has no scene in the foreground, and `OffhookApp`
   starts the engine only for such a scene. So the push starts the engine itself, and always finds
   it `.idle`.
@@ -225,6 +230,12 @@ transport, the live one included.
   - **Refresh anyway.** pjsip cannot spot a stale connection, so always forcing a fresh one may
     be the robust choice: the call is then answered on a fresh stack. Measure what Flexisip does
     with the INVITE it already sent.
+  - **Skip when the connection is fresh.** If the app is active and the account's
+    `registrationTransport(of:)` was reported `.connected` since it last became active, the
+    connection has not been through a suspension, and the push needs no ip_change. That covers
+    exactly the foreground case above. In the background the app can be suspended with no callback,
+    so there keep ip_change. Absence of a `.disconnected` proves nothing: pjsip notices a dead socket
+    only when it next reads or sends on it (swift-pjsua TD-24). Untested.
   - **Skip when the engine already holds the pushed call.** The Kit derives the CallKit UUID from
     the Call-ID for both the push and the INVITE. A registry entry with a `CallID` bound therefore
     means the INVITE already arrived over a live connection, and the push has nothing to wake. The
