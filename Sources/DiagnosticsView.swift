@@ -96,6 +96,15 @@ extension PJSUAEvent {
             let cl = call.map { " call=\($0)" } ?? ""
             let tp = transportID.map { " tp=\($0)" } ?? ""
             return "ipchange \(operation) status=\(status)\(acc)\(cl)\(tp)"
+        case .transportState(let change):
+            let accounts = change.registeredAccounts.map { "\($0.raw)" }.joined(separator: ",")
+            let acc = accounts.isEmpty ? "" : " acc=\(accounts)"
+            let tls = change.tlsVerifyStatus.map { " verify=\($0)" } ?? ""
+            return "tp \(change.transport) \(change.type) \(change.state) \(change.remote) "
+                + "status=\(change.status)\(acc)\(tls)"
+        case .incomingCallRejected(let call, let sipCallID, let from, let statusCode, let statusText):
+            let cl = call.map { " \($0)" } ?? ""
+            return "rejected\(cl) \(statusCode) \(statusText) callid=\(sipCallID ?? "?") from=\(from ?? "?")"
         }
     }
 }

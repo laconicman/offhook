@@ -147,6 +147,9 @@ actor EngineHarness {
 
         case .ipChangeProgress:
             break   // no test drives an IP change through the harness
+
+        case .transportState, .incomingCallRejected:
+            break   // covered by swift-pjsua's own tests; no Offhook test drives them yet
         }
     }
 
