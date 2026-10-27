@@ -390,9 +390,7 @@ final class OffhookIntegrationTests: XCTestCase {
 
         // Resume encoding on both legs — the caller's rx stays 0 unless the callee's encoder
         // is also transmitting (both legs live in this process).
-        let inboundBefore = await harness.answeredIncoming.count
-        guard let callee = await harness.answeredIncoming.dropFirst(inboundBefore - 1).last,
-              callee != call else {
+        guard let callee = await harness.answeredIncoming.last, callee != call else {
             try? await harness.engine.hangup(call)
             throw XCTSkip("no answered incoming leg to resume encoding on")
         }
@@ -436,8 +434,8 @@ final class OffhookIntegrationTests: XCTestCase {
 
         // Restore the priorities the suite started with, not a hardcoded set.
         let defaults = try await harness.engine.videoCodecs()
-        var restore: [String: UInt8] = [:]
-        for codec in defaults { restore[String(codec.id.split(separator: "/").first ?? "")] = codec.priority }
+        let restore = Dictionary(defaults.map { (String($0.id.split(separator: "/")[0]), $0.priority) },
+                                 uniquingKeysWith: { first, _ in first })
         addTeardownBlock { [harness] in
             try await harness.engine.setVideoCodecPriorities(restore)
         }
@@ -459,9 +457,7 @@ final class OffhookIntegrationTests: XCTestCase {
             try await harness.waitForActiveMedia(call, kind: .audio)
             let video = try await harness.waitForActiveMedia(call, kind: .video, timeout: 15)
 
-            let inboundBefore = await harness.answeredIncoming.count
-            guard let callee = await harness.answeredIncoming.dropFirst(inboundBefore - 1).last,
-                  callee != call else {
+            guard let callee = await harness.answeredIncoming.last, callee != call else {
                 try? await harness.engine.hangup(call)
                 throw XCTSkip("no answered incoming leg for \(name)")
             }
