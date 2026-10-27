@@ -367,10 +367,13 @@ final class OffhookIntegrationTests: XCTestCase {
 
     // MARK: 06 — video call + statistics
 
-    /// Video loopback call ACC1 → ACC2: audio confirmed, then a video stream active, with video
-    /// RTP flowing. Skips (not fails) when video can't come up on this host — the Simulator has
-    /// no camera, so this depends on the binary's fallback capture device; run on a device for
-    /// the authoritative result.
+    /// Video loopback call ACC1 → ACC2: audio confirmed, then a video stream active, with
+    /// video RTP flowing. Two facts make this work on the Simulator: the encoder starts
+    /// *paused* (`pjsua_acc_config.vid_out_auto_transmit` defaults to 0 and the engine never
+    /// sets it — the missing packets test06 used to skip over were a paused encoder, not a
+    /// missing camera), and the binary registers pjmedia's colorbar capture device as the
+    /// fallback when no real camera exists. `startVideoTransmission` on BOTH legs resumes the
+    /// encoders; the colorbar feeds them.
     func test06_videoLoopbackCallWithStatistics() async throws {
         let (caller, calleeAOR) = try Self.loopbackPair()
         let call = try await harness.engine.makeCall(to: calleeAOR, from: caller, video: true)
@@ -382,11 +385,26 @@ final class OffhookIntegrationTests: XCTestCase {
             video = try await harness.waitForActiveMedia(call, kind: .video, timeout: 15)
         } catch {
             try? await harness.engine.hangup(call)
-            throw XCTSkip("video stream did not become active on this host (no camera?) — run on a device")
+            throw XCTSkip("video stream did not become active on this host — run on a device")
         }
 
+        // Resume encoding on both legs — the caller's rx stays 0 unless the callee's encoder
+        // is also transmitting (both legs live in this process).
+        let inboundBefore = await harness.answeredIncoming.count
+        guard let callee = await harness.answeredIncoming.dropFirst(inboundBefore - 1).last,
+              callee != call else {
+            try? await harness.engine.hangup(call)
+            throw XCTSkip("no answered incoming leg to resume encoding on")
+        }
+        try await harness.engine.startVideoTransmission(call)
+        try await harness.engine.startVideoTransmission(callee)
+
         try await Task.sleep(for: .seconds(5))
-        let stats = try await harness.engine.statistics(for: call, mediaIndex: video.index)
+        var stats = try await harness.engine.statistics(for: call, mediaIndex: video.index)
+        for _ in 0..<2 where stats.receive.packets == 0 {
+            try await Task.sleep(for: .seconds(5))
+            stats = try await harness.engine.statistics(for: call, mediaIndex: video.index)
+        }
         XCTAssertEqual(stats.kind, .video)
         XCTAssertFalse(stats.codec.name.isEmpty, "video active but no codec negotiated")
         print("[stats] video \(stats.codec): tx \(stats.transmit.packets) pkt, " +
@@ -395,12 +413,86 @@ final class OffhookIntegrationTests: XCTestCase {
         try await harness.engine.hangup(call)
         try await harness.waitForCallState(call, .disconnected)
 
-        // Negotiation + active stream + readable stats prove the video *surface*. Actual RTP
-        // needs a capture source; the Simulator has no camera (H264 negotiates, 0 packets
-        // flow — observed), so flow verification is a device test: skip, don't fail.
-        if stats.transmit.packets == 0 && stats.receive.packets == 0 {
-            throw XCTSkip("video negotiated (\(stats.codec)) but no RTP on this host — verify flow on a device")
+        // With both encoders resumed the counters must move — the Simulator's colorbar source
+        // produces real RTP. If tx/rx stay 0 here that is a regression, not weather.
+        XCTAssertGreaterThan(stats.transmit.packets, 0,
+                             "video negotiated (\(stats.codec)) but no RTP transmitted")
+        XCTAssertGreaterThan(stats.receive.packets, 0,
+                             "video negotiated (\(stats.codec)) but no RTP received")
+    }
+
+    // MARK: 06b — the video codec choice is ours
+
+    /// Video twin of test04b: the engine's video priority surface changes the wire result —
+    /// VP8 only, VP9 only, then H264 only are each negotiated over the Flexisip loopback, which
+    /// relays all three unchanged. It also proves the software VP8/VP9 encoders (libvpx) and
+    /// VideoToolbox produce and receive real RTP on the Simulator, fed by the colorbar capture
+    /// source — `startVideoTransmission` resumes the paused encoders (see test06). What it does
+    /// NOT prove: anything about a camera → encoder path or picture quality — that is device and
+    /// FieldKit territory. A codec mismatch is a hard failure — that is the point. Only a
+    /// loopback that never confirms is weather.
+    func test06b_videoCodecPreferenceDecidesTheNegotiation() async throws {
+        let (caller, calleeAOR) = try Self.loopbackPair()
+
+        // Restore the priorities the suite started with, not a hardcoded set.
+        let defaults = try await harness.engine.videoCodecs()
+        var restore: [String: UInt8] = [:]
+        for codec in defaults { restore[String(codec.id.split(separator: "/").first ?? "")] = codec.priority }
+        addTeardownBlock { [harness] in
+            try await harness.engine.setVideoCodecPriorities(restore)
         }
+
+        func negotiate(_ priorities: [String: UInt8], expecting name: String) async throws {
+            try await harness.engine.setVideoCodecPriorities(priorities)
+            let codecs = try await harness.engine.videoCodecs()
+            print("[codecs] offer order: "
+                  + codecs.map { "\($0.id)(\($0.priority))" }.joined(separator: " "))
+
+            let call = try await harness.engine.makeCall(to: calleeAOR, from: caller, video: true)
+            do {
+                try await harness.waitForCallState(call, .confirmed)
+            } catch is EngineHarness.Timeout {
+                // Weather, not a codec result: clear the leg so later tests find the table empty.
+                try? await harness.engine.hangup(call)
+                throw XCTSkip("loopback did not confirm — provider weather")
+            }
+            try await harness.waitForActiveMedia(call, kind: .audio)
+            let video = try await harness.waitForActiveMedia(call, kind: .video, timeout: 15)
+
+            let inboundBefore = await harness.answeredIncoming.count
+            guard let callee = await harness.answeredIncoming.dropFirst(inboundBefore - 1).last,
+                  callee != call else {
+                try? await harness.engine.hangup(call)
+                throw XCTSkip("no answered incoming leg for \(name)")
+            }
+            try await harness.engine.startVideoTransmission(call)
+            try await harness.engine.startVideoTransmission(callee)
+
+            try await Task.sleep(for: .seconds(5)) // let video RTP + first RTCP round flow
+            var stats = try await harness.engine.statistics(for: call, mediaIndex: video.index)
+            // Same media-relay lag allowance as test04b — the codec assertion is unaffected;
+            // this only waits for the counters.
+            for _ in 0..<2 where stats.receive.packets == 0 {
+                try await Task.sleep(for: .seconds(5))
+                stats = try await harness.engine.statistics(for: call, mediaIndex: video.index)
+            }
+            XCTAssertEqual(stats.codec.name.lowercased(), name.lowercased(),
+                           "negotiated \(stats.codec), wanted \(name)")
+            XCTAssertEqual(stats.codec.clockRate, 90000)
+            XCTAssertGreaterThan(stats.transmit.packets, 0, "no video RTP transmitted")
+            XCTAssertGreaterThan(stats.receive.packets, 0, "no video RTP received")
+            print("[stats] video \(stats.codec): tx \(stats.transmit.packets) "
+                  + "pkt/\(stats.transmit.bytes) B, rx \(stats.receive.packets) pkt "
+                  + "(lost \(stats.receive.lost), jitter \(stats.receive.jitter.meanMs) ms), "
+                  + "rtt \(stats.roundTrip.meanMs) ms")
+
+            try await harness.engine.hangup(call)
+            try await harness.waitForCallState(call, .disconnected)
+        }
+
+        try await negotiate(["VP8": 255, "H264": 0, "VP9": 0], expecting: "VP8")
+        try await negotiate(["VP9": 255, "H264": 0, "VP8": 0], expecting: "VP9")
+        try await negotiate(["H264": 255, "VP8": 0, "VP9": 0], expecting: "H264")
     }
 
     // MARK: 07 — a local hangup must still produce a statistics record
