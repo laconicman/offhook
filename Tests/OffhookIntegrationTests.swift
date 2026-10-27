@@ -138,7 +138,7 @@ final class OffhookIntegrationTests: XCTestCase {
 
     /// Audio loopback call ACC1 → ACC2 through the registrar: confirmed, media active, RTP in
     /// both directions, and the negotiated codec within the binary's documented set
-    /// (G.711/G.722/iLBC/G.729 — **no Opus**; see swift-pjsip/docs/Codec-Coverage.md).
+    /// (G.711/G.722/iLBC/G.729/Opus; see swift-pjsip/docs/Codec-Coverage.md).
     func test04_audioLoopbackCallWithStatistics() async throws {
         let (caller, calleeAOR) = try Self.loopbackPair()
         let call = try await harness.engine.makeCall(to: calleeAOR, from: caller)
@@ -154,7 +154,7 @@ final class OffhookIntegrationTests: XCTestCase {
             try await Task.sleep(for: .seconds(5))
             stats = try await harness.engine.statistics(for: call)
         }
-        let allowedCodecs: Set<String> = ["PCMU", "PCMA", "G722", "ILBC", "G729"]
+        let allowedCodecs: Set<String> = ["PCMU", "PCMA", "G722", "ILBC", "G729", "OPUS"]
         XCTAssertTrue(allowedCodecs.contains(stats.codec.name.uppercased()),
                       "negotiated \(stats.codec) — outside the binary's documented codec set")
         XCTAssertGreaterThan(stats.transmit.packets, 0, "no RTP transmitted")
