@@ -174,7 +174,8 @@ final class OffhookIntegrationTests: XCTestCase {
     /// priority after iLBC and G.711 — so test04 kept negotiating iLBC. This proves the engine's
     /// priority surface changes the wire result (Opus on, Opus off → PCMU), and that the server
     /// (Flexisip, sip.linphone.org, ACC1 → ACC2) passes Opus through rather than forcing a codec
-    /// of its own. A codec mismatch is a hard failure — that is the point.
+    /// of its own. A codec mismatch is a hard failure — that is the point. Only a loopback that
+    /// never confirms is weather.
     func test04b_codecPreferenceDecidesTheNegotiation() async throws {
         let (caller, calleeAOR) = try Self.loopbackPair()
 
@@ -193,7 +194,13 @@ final class OffhookIntegrationTests: XCTestCase {
                   + codecs.map { "\($0.id)(\($0.priority))" }.joined(separator: " "))
 
             let call = try await harness.engine.makeCall(to: calleeAOR, from: caller)
-            try await harness.waitForCallState(call, .confirmed)
+            do {
+                try await harness.waitForCallState(call, .confirmed)
+            } catch is EngineHarness.Timeout {
+                // Weather, not a codec result: clear the leg so later tests find the table empty.
+                try? await harness.engine.hangup(call)
+                throw XCTSkip("loopback did not confirm — provider weather")
+            }
             try await harness.waitForActiveMedia(call, kind: .audio)
 
             try await Task.sleep(for: .seconds(5)) // let RTP + first RTCP round flow
@@ -219,11 +226,7 @@ final class OffhookIntegrationTests: XCTestCase {
             try await harness.waitForCallState(call, .disconnected)
         }
 
-        do {
-            try await negotiate(["opus": 255], expecting: "opus", clockRate: 48000)
-        } catch is EngineHarness.Timeout {
-            throw XCTSkip("loopback did not confirm — provider weather")
-        }
+        try await negotiate(["opus": 255], expecting: "opus", clockRate: 48000)
         try await negotiate(["opus": 0, "PCMU": 255], expecting: "PCMU", clockRate: 8000)
     }
 
