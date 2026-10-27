@@ -454,23 +454,30 @@ final class OffhookIntegrationTests: XCTestCase {
                 try? await harness.engine.hangup(call)
                 throw XCTSkip("loopback did not confirm — provider weather")
             }
-            try await harness.waitForActiveMedia(call, kind: .audio)
-            let video = try await harness.waitForActiveMedia(call, kind: .video, timeout: 15)
+            // Any failure past this point must not leave the leg up for later tests.
+            let stats: CallStreamStatistics
+            do {
+                try await harness.waitForActiveMedia(call, kind: .audio)
+                let video = try await harness.waitForActiveMedia(call, kind: .video, timeout: 15)
 
-            guard let callee = await harness.answeredIncoming.last, callee != call else {
+                guard let callee = await harness.answeredIncoming.last, callee != call else {
+                    throw XCTSkip("no answered incoming leg for \(name)")
+                }
+                try await harness.engine.startVideoTransmission(call)
+                try await harness.engine.startVideoTransmission(callee)
+
+                try await Task.sleep(for: .seconds(5)) // let video RTP + first RTCP round flow
+                var s = try await harness.engine.statistics(for: call, mediaIndex: video.index)
+                // Same media-relay lag allowance as test04b — the codec assertion is unaffected;
+                // this only waits for the counters.
+                for _ in 0..<2 where s.receive.packets == 0 {
+                    try await Task.sleep(for: .seconds(5))
+                    s = try await harness.engine.statistics(for: call, mediaIndex: video.index)
+                }
+                stats = s
+            } catch {
                 try? await harness.engine.hangup(call)
-                throw XCTSkip("no answered incoming leg for \(name)")
-            }
-            try await harness.engine.startVideoTransmission(call)
-            try await harness.engine.startVideoTransmission(callee)
-
-            try await Task.sleep(for: .seconds(5)) // let video RTP + first RTCP round flow
-            var stats = try await harness.engine.statistics(for: call, mediaIndex: video.index)
-            // Same media-relay lag allowance as test04b — the codec assertion is unaffected;
-            // this only waits for the counters.
-            for _ in 0..<2 where stats.receive.packets == 0 {
-                try await Task.sleep(for: .seconds(5))
-                stats = try await harness.engine.statistics(for: call, mediaIndex: video.index)
+                throw error
             }
             XCTAssertEqual(stats.codec.name.lowercased(), name.lowercased(),
                            "negotiated \(stats.codec), wanted \(name)")
