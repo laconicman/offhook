@@ -539,18 +539,18 @@ final class OffhookIntegrationTests: XCTestCase {
         }
         // A throw anywhere below must not strand connected legs in the process-wide harness.
         addTeardownBlock { [harness] in
-            try? await harness.engine.hangupAll()
+            await harness.engine.hangupAll()
         }
 
         // Call A: ACC1 → ACC2 (the leg we REFER away). Call B: ACC2 → ACC1 (the leg whose
         // inbound side gets replaced by the REFER recipient's new INVITE).
         let callA = try await harness.engine.makeCall(to: calleeAOR, from: caller)
-        try await harness.waitForCallOutcome(callA)
+        _ = try await harness.waitForCallOutcome(callA)
         try await harness.waitForCallState(callA, .confirmed)
 
         let inboundBefore = await harness.answeredIncoming.count
         let callB = try await harness.engine.makeCall(to: callerAOR, from: secondAccount)
-        try await harness.waitForCallOutcome(callB)
+        _ = try await harness.waitForCallOutcome(callB)
         try await harness.waitForCallState(callB, .confirmed)
         // B's inbound leg is the last auto-answered call — the one `.callReplaced` fires on.
         guard let callBInbound = await harness.answeredIncoming.dropFirst(inboundBefore).last else {
