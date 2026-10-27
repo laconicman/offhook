@@ -168,6 +168,65 @@ final class OffhookIntegrationTests: XCTestCase {
         try await harness.waitForCallState(call, .disconnected)
     }
 
+    // MARK: 04b — the codec choice is ours
+
+    /// The binary has carried Opus since swift-pjsip 0.4.0, but pjmedia registers it at normal
+    /// priority after iLBC and G.711 — so test04 kept negotiating iLBC. This proves the engine's
+    /// priority surface changes the wire result (Opus on, Opus off → PCMU), and that the server
+    /// (Flexisip, sip.linphone.org, ACC1 → ACC2) passes Opus through rather than forcing a codec
+    /// of its own. A codec mismatch is a hard failure — that is the point.
+    func test04b_codecPreferenceDecidesTheNegotiation() async throws {
+        let (caller, calleeAOR) = try Self.loopbackPair()
+
+        // Cannot restore the table exactly as test04 found it — iLBC held first place by
+        // factory-registration order at equal priority, an order setCodecPriorities cannot
+        // express — and does not need to: test04 accepts the whole documented codec set.
+        addTeardownBlock { [harness] in
+            try await harness.engine.setCodecPriorities(["opus": 128, "PCMU": 128])
+        }
+
+        func negotiate(_ priorities: [String: UInt8],
+                       expecting name: String, clockRate: UInt32) async throws {
+            try await harness.engine.setCodecPriorities(priorities)
+            let codecs = try await harness.engine.audioCodecs()
+            print("[codecs] offer order: "
+                  + codecs.map { "\($0.id)(\($0.priority))" }.joined(separator: " "))
+
+            let call = try await harness.engine.makeCall(to: calleeAOR, from: caller)
+            try await harness.waitForCallState(call, .confirmed)
+            try await harness.waitForActiveMedia(call, kind: .audio)
+
+            try await Task.sleep(for: .seconds(5)) // let RTP + first RTCP round flow
+
+            var stats = try await harness.engine.statistics(for: call)
+            // Same media-relay lag allowance as test04 — the codec assertion below is
+            // unaffected by it; this only waits for the counters.
+            for _ in 0..<2 where stats.receive.packets == 0 {
+                try await Task.sleep(for: .seconds(5))
+                stats = try await harness.engine.statistics(for: call)
+            }
+            XCTAssertEqual(stats.codec.name.lowercased(), name.lowercased(),
+                           "negotiated \(stats.codec), wanted \(name)")
+            XCTAssertEqual(stats.codec.clockRate, clockRate)
+            XCTAssertGreaterThan(stats.transmit.packets, 0, "no RTP transmitted")
+            XCTAssertGreaterThan(stats.receive.packets, 0, "no RTP received")
+            print("[stats] audio \(stats.codec): tx \(stats.transmit.packets) "
+                  + "pkt/\(stats.transmit.bytes) B, rx \(stats.receive.packets) pkt "
+                  + "(lost \(stats.receive.lost), jitter \(stats.receive.jitter.meanMs) ms), "
+                  + "rtt \(stats.roundTrip.meanMs) ms")
+
+            try await harness.engine.hangup(call)
+            try await harness.waitForCallState(call, .disconnected)
+        }
+
+        do {
+            try await negotiate(["opus": 255], expecting: "opus", clockRate: 48000)
+        } catch is EngineHarness.Timeout {
+            throw XCTSkip("loopback did not confirm — provider weather")
+        }
+        try await negotiate(["opus": 0, "PCMU": 255], expecting: "PCMU", clockRate: 8000)
+    }
+
     // MARK: 05 — simultaneous calls, to the ceiling
 
     /// Four loopback calls concurrently confirmed — with their four auto-answered incoming legs
