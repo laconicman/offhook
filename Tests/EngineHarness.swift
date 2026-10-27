@@ -108,6 +108,11 @@ actor EngineHarness {
         //   swift-pjsua's TD-19.
         var configuration = PJSUA.Configuration()
         configuration.transports.append(TransportConfiguration("tls", .tls, port: 0))
+        // The loopback proof in test04b negotiates Opus, and RFC 7587 fixes Opus at 48 kHz —
+        // on the default 16 kHz bridge every Opus frame would be resampled in both directions.
+        // The whole suite therefore runs on a 48 kHz bridge; the null sound device follows
+        // `clockRate`, so nothing else changes.
+        configuration.media.clockRate = 48000
         try await engine.start(configuration)
         try await engine.activateNullAudioDevice()
     }

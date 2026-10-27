@@ -75,6 +75,9 @@ final class PhoneModel: NSObject {
     /// by `CallID` (the tap's events don't expose CallKit UUIDs, and don't need to — this
     /// view is engine-facing). Filled by `.callMediaState`, evicted on `.disconnected`.
     private(set) var mediaByCall: [CallID: [CallMediaInfo]] = [:]
+    /// The binary's audio codec table in SDP offer order, read once at engine start —
+    /// the Diagnostics inspector's source for "what will we offer".
+    private(set) var audioCodecs: [CodecInfo] = []
 
     /// Saved accounts (secrets live in the Keychain, never here) and their live registration
     /// text, keyed by `SavedAccount.id` → engine `AccountID` → status.
@@ -232,6 +235,7 @@ final class PhoneModel: NSObject {
             // observed — it parks in `pendingPathSignature` and fires once `.running`.
             startPathMonitor()
             try await engine.start(configuration)
+            audioCodecs = (try? await engine.audioCodecs()) ?? []
             // Registration relay: the router owns the event stream; the app observes through it.
             // The observer is @MainActor, so this closure runs on the main actor — update directly.
             await callKit.router.setRegistrationObserver { [weak self] account, active, code, expiration in

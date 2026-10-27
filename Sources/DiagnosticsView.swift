@@ -11,6 +11,18 @@ struct DiagnosticsView: View {
 
     var body: some View {
         Form {
+            Section("Audio codecs (offer order)") {
+                if model.audioCodecs.isEmpty {
+                    Text("Engine not started.").foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.audioCodecs, id: \.id) { codec in
+                        LabeledContent(codec.id) {
+                            Text(codec.priority == 0 ? "disabled" : "prio \(codec.priority)")
+                                .font(.caption.monospaced())
+                        }
+                    }
+                }
+            }
             Section("Conference slots") {
                 if model.mediaByCall.isEmpty {
                     Text("No active media.").foregroundStyle(.secondary)
