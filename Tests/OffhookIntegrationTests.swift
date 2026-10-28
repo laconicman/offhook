@@ -372,7 +372,7 @@ final class OffhookIntegrationTests: XCTestCase {
     /// *paused* (`pjsua_acc_config.vid_out_auto_transmit` defaults to 0 and the engine never
     /// sets it — the missing packets test06 used to skip over were a paused encoder, not a
     /// missing camera), and the binary registers pjmedia's colorbar capture device as the
-    /// fallback when no real camera exists. `startVideoTransmission` on BOTH legs resumes the
+    /// fallback when no real camera exists. `setCameraEnabled` on BOTH legs resumes the
     /// encoders; the colorbar feeds them.
     func test06_videoLoopbackCallWithStatistics() async throws {
         let (caller, calleeAOR) = try Self.loopbackPair()
@@ -394,8 +394,8 @@ final class OffhookIntegrationTests: XCTestCase {
             try? await harness.engine.hangup(call)
             throw XCTSkip("no answered incoming leg to resume encoding on")
         }
-        try await harness.engine.startVideoTransmission(call)
-        try await harness.engine.startVideoTransmission(callee)
+        try await harness.engine.setCameraEnabled(call, true)
+        try await harness.engine.setCameraEnabled(callee, true)
 
         try await Task.sleep(for: .seconds(5))
         var stats = try await harness.engine.statistics(for: call, mediaIndex: video.index)
@@ -425,7 +425,7 @@ final class OffhookIntegrationTests: XCTestCase {
     /// VP8 only, VP9 only, then H264 only are each negotiated over the Flexisip loopback, which
     /// relays all three unchanged. It also proves the software VP8/VP9 encoders (libvpx) and
     /// VideoToolbox produce and receive real RTP on the Simulator, fed by the colorbar capture
-    /// source — `startVideoTransmission` resumes the paused encoders (see test06). What it does
+    /// source — `setCameraEnabled` resumes the paused encoders (see test06). What it does
     /// NOT prove: anything about a camera → encoder path or picture quality — that is device and
     /// FieldKit territory. A codec mismatch is a hard failure — that is the point. Only a
     /// loopback that never confirms is weather.
@@ -463,8 +463,8 @@ final class OffhookIntegrationTests: XCTestCase {
                 guard let callee = await harness.answeredIncoming.last, callee != call else {
                     throw XCTSkip("no answered incoming leg for \(name)")
                 }
-                try await harness.engine.startVideoTransmission(call)
-                try await harness.engine.startVideoTransmission(callee)
+                try await harness.engine.setCameraEnabled(call, true)
+                try await harness.engine.setCameraEnabled(callee, true)
 
                 try await Task.sleep(for: .seconds(5)) // let video RTP + first RTCP round flow
                 var s = try await harness.engine.statistics(for: call, mediaIndex: video.index)
@@ -496,6 +496,110 @@ final class OffhookIntegrationTests: XCTestCase {
         try await negotiate(["VP8": 255, "H264": 0, "VP9": 0], expecting: "VP8")
         try await negotiate(["VP9": 255, "H264": 0, "VP8": 0], expecting: "VP9")
         try await negotiate(["H264": 255, "VP8": 0, "VP9": 0], expecting: "H264")
+    }
+
+    // MARK: 06c — media intent survives a hold/resume rebuild (#38)
+
+    /// The regression test for "a muted-then-held-then-resumed call comes back with a
+    /// live mic" and "a video call transmits nothing after a rebuild": pjsua tears down
+    /// and rebuilds the streams on every direction change (`is_media_changed`,
+    /// pjsua_media.c), and the rebuild used to reset the mic bridge to connected and the
+    /// video encoder to paused. `CallMediaIntent` makes both decisions the user's,
+    /// re-applied by the engine on every rebuild — so after `setMute` + hold + resume
+    /// the mic must still be unbridged, and the camera must resume transmitting with no
+    /// second `setCameraEnabled`.
+    ///
+    /// `isMicrophoneBridged(to:)` reads the conference bridge itself (port 0's listener
+    /// list), so it observes the *applied* state, not the recorded intent — the bug was
+    /// exactly the two diverging.
+    func test06c_mediaIntentSurvivesHold() async throws {
+        // `harness.registerLoopbackPair` registers the pair itself, so this runs standalone
+        // under `-only-testing:` as well as inside a full-suite run (test09 does the same).
+        let (caller, calleeAOR) = try await harness.registerLoopbackPair()
+        let call = try await harness.engine.makeCall(to: calleeAOR, from: caller, video: true)
+        do {
+            try await harness.waitForCallState(call, .confirmed)
+        } catch is EngineHarness.Timeout {
+            try? await harness.engine.hangup(call)
+            throw XCTSkip("loopback did not confirm — provider weather")
+        }
+        // Any failure past this point must not leave the leg up for later tests.
+        addTeardownBlock { [harness] in
+            try? await harness.engine.hangup(call)
+        }
+        try await harness.waitForActiveMedia(call, kind: .audio)
+
+        let video: CallMediaInfo
+        do {
+            video = try await harness.waitForActiveMedia(call, kind: .video, timeout: 15)
+        } catch {
+            throw XCTSkip("video stream did not become active on this host — run on a device")
+        }
+        guard let callee = await harness.answeredIncoming.last, callee != call else {
+            throw XCTSkip("no answered incoming leg to enable the camera on")
+        }
+        try await harness.engine.setCameraEnabled(call, true)
+        try await harness.engine.setCameraEnabled(callee, true)
+
+        // Baseline: A's encoder transmits (the Simulator's colorbar source feeds it).
+        var tx = try await harness.engine.statistics(for: call, mediaIndex: video.index)
+        for _ in 0..<3 where tx.transmit.packets == 0 {
+            try await Task.sleep(for: .seconds(5))
+            tx = try await harness.engine.statistics(for: call, mediaIndex: video.index)
+        }
+        XCTAssertGreaterThan(tx.transmit.packets, 0,
+                             "video negotiated but no RTP transmitted before hold")
+
+        // Mute → the mic is unbridged once the queued conf op lands (a frame; the bridge
+        // state is polled — conf connect/disconnect are posted to the media thread).
+        try await harness.engine.setMute(call, muted: true)
+        try await harness.waitForMicBridge(to: call, false)
+
+        // Hold → the stream rebuild must not un-mute (the bug), and resume must not
+        // either — asserted on the bridge, which is where the bug actually showed.
+        try await harness.engine.setHold(call)
+        try await harness.waitForMediaStatus(call, kind: .audio, .localHold)
+
+        // While WE hold, the camera must not run: the held video stream is sendonly
+        // (`.localHold` + encoding — the same shape a deliberate sendonly has), and the
+        // engine gates camera re-apply on the audio stream's `.localHold`, the proxy for
+        // pjsua's own `!call->local_hold`. Two samples prove nothing left the encoder.
+        let heldTx1 = try await harness.engine.statistics(for: call, mediaIndex: video.index)
+        try await Task.sleep(for: .seconds(3))
+        let heldTx2 = try await harness.engine.statistics(for: call, mediaIndex: video.index)
+        XCTAssertEqual(heldTx2.transmit.packets, heldTx1.transmit.packets,
+                       "camera transmitted while the call was on local hold")
+
+        try await harness.engine.resume(call)
+        try await harness.waitForActiveMedia(call, kind: .audio)
+        // Still unbridged *stably*: let any rebuild-queued conf op land, then read —
+        // polling for `false` alone could pass before a stale re-connect arrives, which
+        // is exactly what the pre-intent engine did (unconditional connect in the
+        // media-state callback).
+        try await Task.sleep(for: .seconds(1))
+        let bridged = await harness.engine.isMicrophoneBridged(to: call)
+        XCTAssertFalse(bridged,
+                       "mic bridged again after hold/resume — the intent was lost in the rebuild")
+
+        // The camera intent survived too: the engine re-applies it on the resume rebuild,
+        // so A's encoder transmits again with NO second setCameraEnabled. The rebuilt
+        // stream's counters may restart at zero, so the proof is two post-resume samples
+        // ~5 s apart rising — not a comparison with the pre-hold baseline.
+        var earlier = try await harness.engine.statistics(for: call, mediaIndex: video.index)
+        var later = earlier
+        for _ in 0..<3 where later.transmit.packets <= earlier.transmit.packets {
+            try await Task.sleep(for: .seconds(5))
+            later = try await harness.engine.statistics(for: call, mediaIndex: video.index)
+        }
+        XCTAssertGreaterThan(later.transmit.packets, earlier.transmit.packets,
+                             "video TX did not resume after hold without a second setCameraEnabled")
+
+        // Unmute → bridged again once the queued connect lands.
+        try await harness.engine.setMute(call, muted: false)
+        try await harness.waitForMicBridge(to: call, true)
+
+        try await harness.engine.hangup(call)
+        try await harness.waitForCallState(call, .disconnected)
     }
 
     // MARK: 07 — a local hangup must still produce a statistics record

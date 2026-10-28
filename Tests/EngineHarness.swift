@@ -155,6 +155,9 @@ actor EngineHarness {
 
         case .transportState, .incomingCallRejected:
             break   // covered by swift-pjsua's own tests; no Offhook test drives them yet
+
+        case .cameraStartFailed:
+            break   // a camera re-apply failure is diagnostic; test06c watches packets instead
         }
     }
 
@@ -280,6 +283,17 @@ actor EngineHarness {
         }
     }
 
+    /// Wait for a stream of `kind` on `call` to reach `status` and return its media
+    /// info — the hold counterpart of ``waitForActiveMedia(_:kind:timeout:)``.
+    @discardableResult
+    func waitForMediaStatus(_ call: CallID, kind: CallMediaInfo.Kind,
+                            _ status: CallMediaStatus,
+                            timeout: TimeInterval = 20) async throws -> CallMediaInfo {
+        try await poll(timeout: timeout, what: "\(kind) media on \(call) to reach \(status)") {
+            media[call]?.first { $0.kind == kind && $0.status == status }
+        }
+    }
+
     /// Wait for a stream record for `call` that arrives after `index` records have been seen.
     /// The index makes the wait unambiguous: a call that was held and resumed already has
     /// records, and the one being waited on is the *next* one.
@@ -306,6 +320,19 @@ actor EngineHarness {
         }
     }
 
+    /// Wait for the mic's conference link to `call` (slot 0 → the call's port) to reach
+    /// `bridged`. `pjsua_conf_connect`/`disconnect` post to the conference worker thread
+    /// — the applied state lags the API call by a frame, so it must be polled, not read once.
+    /// (`isMicrophoneBridged` reads the bridge itself, not the recorded intent.)
+    @discardableResult
+    func waitForMicBridge(to call: CallID, _ bridged: Bool,
+                          timeout: TimeInterval = 5) async throws -> Bool {
+        try await pollAsync(timeout: timeout, what: "mic bridge to \(call) = \(bridged)") {
+            let state = await engine.isMicrophoneBridged(to: call)
+            return state == bridged ? state : nil
+        }
+    }
+
     struct Timeout: Error, CustomStringConvertible {
         let what: String
         var description: String { "timed out waiting for \(what)" }
@@ -316,6 +343,17 @@ actor EngineHarness {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if let value = check() { return value }
+            try await Task.sleep(nanoseconds: 100_000_000) // 100 ms
+        }
+        throw Timeout(what: what)
+    }
+
+    /// ``poll(timeout:what:_:)`` for checks that must `await` the engine.
+    private func pollAsync<T>(timeout: TimeInterval, what: String,
+                              _ check: () async -> T?) async throws -> T {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let value = await check() { return value }
             try await Task.sleep(nanoseconds: 100_000_000) // 100 ms
         }
         throw Timeout(what: what)
