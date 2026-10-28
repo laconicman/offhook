@@ -38,6 +38,11 @@ actor EngineHarness {
     private(set) var media: [CallID: [CallMediaInfo]] = [:]
     private(set) var answeredIncoming: [CallID] = []
 
+    /// `acceptVideo` passed to the auto-answer of every incoming call — `true` by default;
+    /// a test sets `false` before placing the call to answer it audio-only (test06d).
+    private var answerAcceptsVideo = true
+    func setAnswerAcceptsVideo(_ accepts: Bool) { answerAcceptsVideo = accepts }
+
     /// REFER progress observed via `.callTransferStatus` (transferor side) and
     /// `.callReplaced` pairs (transferee side) — test09 asserts on both.
     private(set) var transferStatuses: [(call: CallID, code: Int32, final: Bool)] = []
@@ -128,7 +133,9 @@ actor EngineHarness {
         case let .incomingCall(_, call, _, _, _):
             callStates[call] = .incoming
             answeredIncoming.append(call)
-            try? await engine.answer(call) // auto-answer: the callee leg of loopback tests
+            // auto-answer: the callee leg of loopback tests. `answerAcceptsVideo` lets a
+            // test pre-load the declined-video answer (test06d) without duplicating this path.
+            try? await engine.answer(call, acceptVideo: answerAcceptsVideo)
 
         case let .callState(call, state, _, lastStatus):
             callStates[call] = state
@@ -156,8 +163,8 @@ actor EngineHarness {
         case .transportState, .incomingCallRejected:
             break   // covered by swift-pjsua's own tests; no Offhook test drives them yet
 
-        case .cameraStartFailed:
-            break   // a camera re-apply failure is diagnostic; test06c watches packets instead
+        case .videoTransmissionFailed:
+            break   // a video-transmission re-apply failure is diagnostic; test06c watches packets instead
         }
     }
 
