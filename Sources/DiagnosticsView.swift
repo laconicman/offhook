@@ -101,6 +101,8 @@ extension PJSUAEvent {
             }
         case .callTransferStatus(let call, let statusCode, let statusText, let isFinal):
             return "xfer \(call) \(statusCode) \(statusText)\(isFinal ? " final" : "")"
+        case .videoTransmissionFailed(let call, let status):
+            return "vidtxfail \(call) status=\(status)"
         case .callReplaced(let call, let newCall):
             return "replaced \(call) → \(newCall)"
         case .ipChangeProgress(let operation, let status, let account, let call, let transportID):
