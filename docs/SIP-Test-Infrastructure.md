@@ -511,7 +511,9 @@ python3 ../scripts/tcp-hello-drop.py --target sbc.example:5061 --rst-after 1400
 python3 ../scripts/tcp-hello-drop.py --target sbc.example:5061 --pass       # control
 ```
 
-Point an account's registrar URI at `sip:<mac>:15061;transport=tls`.
+Point an account's registrar URI at `sip:<mac>:15061;transport=tls`. The proxy listens on
+127.0.0.1 by default; when the client is another device, add `--bind 0.0.0.0` (or the Mac's
+LAN address) — anyone who can reach the port can then relay through it to `--target`.
 
 | Fault | What it stands for |
 |---|---|

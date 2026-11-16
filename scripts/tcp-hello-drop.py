@@ -48,6 +48,7 @@ import sys
 import time
 
 CHUNK = 16384
+DRAIN_TIMEOUT_S = 30  # bound on the surviving direction after a half-close
 log = logging.getLogger("tcp-hello-drop")
 
 
@@ -95,10 +96,16 @@ async def relay(reader, writer, direction, quota, policy, conn_id):
             forwarded += len(data)
             writer.write(data)
             await writer.drain()
+            if policy.rst_after >= 0 and forwarded == quota:
+                # Exact boundary: the client sent N bytes and waits for the
+                # answer — no next read will ever cross the quota.
+                log.info("conn %d: %s forwarded %d B, now resetting",
+                         conn_id, direction, forwarded)
+                return "rst"
     except (ConnectionResetError, BrokenPipeError):
         pass
     finally:
-        if dropped or quota >= 0:
+        if direction == "c->s":
             log.info("conn %d: %s done — fwd %d B, dropped %d B",
                      conn_id, direction, forwarded, dropped)
     return "eof"
@@ -127,14 +134,25 @@ async def handle(client_reader, client_writer, args, policy, conn_id):
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
                                 struct_linger0())
             w.close()
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
     else:
-        # Normal relay teardown: when one side ends, keep the other going to EOF?
-        # A TLS client only needs the stall/close semantics — close both cleanly.
+        # A FIN is a half-close, not a teardown: propagate it so a reply already
+        # on its way still arrives, then let the surviving direction run to EOF.
+        ended = next(iter(done))
+        peer_writer = server_writer if ended is c2s else client_writer
+        if peer_writer.can_write_eof():
+            peer_writer.write_eof()
+        else:
+            peer_writer.close()
+        if pending:
+            _, pending = await asyncio.wait(pending, timeout=DRAIN_TIMEOUT_S)
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
         client_writer.close()
         server_writer.close()
-    for t in pending:
-        t.cancel()
-    await asyncio.gather(*pending, return_exceptions=True)
     await asyncio.gather(client_writer.wait_closed(),
                          server_writer.wait_closed(), return_exceptions=True)
 
@@ -150,6 +168,10 @@ async def main():
         description="middlebox emulator: split-ClientHello drop/RST TCP proxy",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--listen", type=int, default=15061, help="listen port (default 15061)")
+    p.add_argument("--bind", default="127.0.0.1",
+                   help="listen address (default 127.0.0.1; use 0.0.0.0 or a LAN "
+                        "address when the client is another device — the port then "
+                        "relays to --target for anyone who can reach it)")
     p.add_argument("--target", required=True, help="host:port to forward to")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--pass", dest="pass_", action="store_true",
@@ -207,7 +229,7 @@ async def main():
                  "on" if policy.active else "off", why)
         await handle(r, w, args, policy, counter)
 
-    server = await asyncio.start_server(on_client, "0.0.0.0", args.listen)
+    server = await asyncio.start_server(on_client, args.bind, args.listen)
     mode = ("pass" if args.pass_ else
             f"truncate@{args.truncate}" if args.truncate >= 0 else
             f"rst-after@{args.rst_after}" if args.rst_after >= 0 else
@@ -217,7 +239,7 @@ async def main():
         sel.append(f"first-after-idle {args.first_after_idle:g}s")
     if args.fail_prob != 1.0:
         sel.append(f"fail-prob {args.fail_prob:g}")
-    log.info("listening on :%d -> %s (mode=%s%s)", args.listen, args.target, mode,
+    log.info("listening on %s:%d -> %s (mode=%s%s)", args.bind, args.listen, args.target, mode,
              ", " + ", ".join(sel) if sel else "")
     async with server:
         await server.serve_forever()
