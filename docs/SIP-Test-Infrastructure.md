@@ -498,6 +498,59 @@ accepting only PATCH releases, which by that repo's bump rule are the ones that 
 binary. Either way **`test03` can use all eight slots of the secrets file** once the new binary
 resolves.
 
+## 7.6 Handshake stalls — payload-level fault injection
+
+`pf-blackhole.sh` drops flows by header. It cannot say "forward the first 1400 bytes of a TCP
+stream and lose the rest", or "stall the first connection after an idle period and let the
+retry through". `../scripts/tcp-hello-drop.py` is a userspace TCP proxy that can:
+
+```sh
+python3 ../scripts/tcp-hello-drop.py --target sbc.example:5061 --truncate 0 --first-after-idle 300
+python3 ../scripts/tcp-hello-drop.py --target sbc.example:5061 --truncate 1400 --fail-prob 0.3
+python3 ../scripts/tcp-hello-drop.py --target sbc.example:5061 --rst-after 1400
+python3 ../scripts/tcp-hello-drop.py --target sbc.example:5061 --pass       # control
+```
+
+Point an account's registrar URI at `sip:<mac>:15061;transport=tls`. The proxy listens on
+127.0.0.1 by default; when the client is another device, add `--bind 0.0.0.0` (or the Mac's
+LAN address) — anyone who can reach the port can then relay through it to `--target`.
+
+| Fault | What it stands for |
+|---|---|
+| `--truncate N`, N inside the ClientHello | a receiver or middlebox that loses the tail of a hello split across TCP segments; the server holds a partial record |
+| `--truncate 0` | a connection that is up and passes nothing — the application-level view of a SYN proxy that accepted the connection with a zero window and never opened it (`../../swift-pjsip/docs/Apple-TLS-Backends.md`, "A zero-window SYN-ACK from a SYN proxy") |
+| `--rst-after N` | a box that resets the flow |
+| `--delay-ms N` | a slow but honest path |
+
+`--first-after-idle S` applies the fault only to a connection that arrives at least S seconds
+after the previous one, `--fail-prob P` only with probability P; every other connection is
+relayed cleanly. Together they give the shape field reports of this class usually have: the
+first attempt after a pause stalls, the retry goes through. Each connection logs
+`fault=on|off` and the bytes forwarded and swallowed.
+
+What to expect in Offhook (reasoned from the source, not yet run on a device): the Apple
+TLS backend reports nothing that happens before the server certificate — not even the
+reset — and the engine sets no TLS handshake timeout, so each of these faults should end
+the same way: the REGISTER transaction times out (Timer F, 32 s) and the account shows 408.
+That uniformity is the point of the test: it shows what the app can and cannot tell apart.
+
+Two side effects of pointing the registrar at the proxy: the account's AOR takes the
+proxy's host and port, which the real registrar may not accept as its domain (check with
+`--pass` first), and the server's certificate no longer matches the name dialled, which
+matters as soon as server verification is switched on.
+
+Semantics, honestly: the proxy acknowledges the client's bytes locally before it decides
+their fate, so the client's TCP believes they were delivered. A real middlebox drops or
+withholds at the packet level, where the client retransmits or sits in a zero window. At
+the TLS layer the result is the same — no ServerHello — and that is the layer this harness
+tests; packet-level behaviour needs a packet-level emulator.
+
+Smoke-verified 2026-11-15 against `openssl s_server` with `openssl s_client`: `--pass`
+completes; `--truncate 256` stalls; `--rst-after 256` fails at once; `--truncate 0
+--first-after-idle 5` stalls the first connection, lets an immediate second one through and
+stalls a third one 6 s later; `--truncate 0 --fail-prob 0.5` faulted 8 of 20 connections and
+exactly those 8 stalled.
+
 ## 8. Observed on the wire (per endpoint)
 
 ### 8.1 Session timer (RFC 4028) — `sip.linphone.org` / Flexisip
