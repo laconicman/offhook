@@ -125,19 +125,10 @@ async def handle(client_reader, client_writer, args, policy, conn_id):
     s2c = asyncio.create_task(relay(server_reader, client_writer, "s->c",
                                     -1, policy, conn_id))
     done, pending = await asyncio.wait({c2s, s2c}, return_when=asyncio.FIRST_COMPLETED)
+    rst = (policy.rst_after >= 0
+           and any(t.exception() is None and t.result() == "rst" for t in done))
 
-    if policy.rst_after >= 0 and any(t.result() == "rst" for t in done):
-        # linger=0 close: the client sees ECONNRESET, like a DPI's RST injection.
-        for w in (client_writer, server_writer):
-            sock = w.get_extra_info("socket")
-            if sock:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
-                                struct_linger0())
-            w.close()
-        for t in pending:
-            t.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-    else:
+    if not rst:
         # A FIN is a half-close, not a teardown: propagate it so a reply already
         # on its way still arrives, then let the surviving direction run to EOF.
         ended = next(iter(done))
@@ -147,12 +138,32 @@ async def handle(client_reader, client_writer, args, policy, conn_id):
         else:
             peer_writer.close()
         if pending:
-            _, pending = await asyncio.wait(pending, timeout=DRAIN_TIMEOUT_S)
-        for t in pending:
-            t.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
+            done, pending = await asyncio.wait(pending, timeout=DRAIN_TIMEOUT_S)
+            # The surviving relay can still reach the reset quota in the drain.
+            rst = (policy.rst_after >= 0 and any(
+                t.exception() is None and t.result() == "rst" for t in done))
+
+    if rst:
+        # linger=0 close: the client sees ECONNRESET, like a DPI's RST injection.
+        # A socket can already be torn down here (a propagated write_eof plus
+        # the drain lets the transport finish closing it); SO_LINGER then
+        # fails and the reset degrades to a plain close — still log it.
+        for w in (client_writer, server_writer):
+            sock = w.get_extra_info("socket")
+            try:
+                if sock:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                    struct_linger0())
+            except OSError as e:
+                log.warning("conn %d: SO_LINGER failed, plain close: %s",
+                            conn_id, e)
+            w.close()
+    else:
         client_writer.close()
         server_writer.close()
+    for t in pending:
+        t.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
     await asyncio.gather(client_writer.wait_closed(),
                          server_writer.wait_closed(), return_exceptions=True)
 
